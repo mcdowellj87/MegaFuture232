@@ -1,0 +1,1259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MegaFuture — World Sandbox</title>
+<style>
+  html, body { margin:0; height:100%; background:#000; overflow:hidden; }
+  #c { display:block; width:100vw; height:100vh; }
+  #hint {
+    position:fixed; left:12px; top:12px;
+    font:12px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    color:#c9c9d2; background:rgba(0,0,0,.35);
+    padding:8px 10px; border-radius:10px;
+    user-select:none; pointer-events:none;
+  }
+</style>
+
+<script type="importmap">
+{
+  "imports": { "three": "./vendor/three.module.js" }
+}
+</script>
+</head>
+
+<body>
+<div id="hint">Click to lock • WASD move • Shift sprint • Space jump</div>
+<canvas id="c"></canvas>
+
+<script type="module">
+import * as THREE from 'three';
+import { PointerLockControls } from './vendor/PointerLockControls.js';
+
+/* =========================
+   FILES
+========================= */
+const MAP_URL = './images/map.png';
+
+/* =========================
+   WORLD TUNING
+========================= */
+const CELL_M = 1.0;
+const BASE_MAX_HEIGHT = 140.0;
+const HEIGHT_CURVE_POW = 0.85;
+
+const PLAYER_SCALE = 2.0;
+const BASE_EYE_HEIGHT = 1.7;
+const PLAYER_EYE_HEIGHT = BASE_EYE_HEIGHT * PLAYER_SCALE;
+
+const SPEED_WALK = 10.0;
+const SPEED_SPRINT = 16.0;
+
+/* Air control: independent of ground/slope */
+const AIR_MAX_SPEED_WALK   = SPEED_WALK;
+const AIR_MAX_SPEED_SPRINT = SPEED_SPRINT;
+const AIR_ACCEL = 26.0;         // how fast you steer in air
+const AIR_FRICTION = 0.0;       // keep 0 for “true glide”; raise slightly if needed
+
+/* Terrain mesh density */
+const SAMPLE_STEP = 4;
+const SMOOTH_PASSES = 3;
+const TOL = 24;
+
+/* =========================
+   PHYSICS
+========================= */
+const GRAVITY = 28.0;
+const JUMP_HEIGHT_MULT = 2.0;
+const JUMP_VEL = Math.sqrt(2 * GRAVITY * (3.0 * JUMP_HEIGHT_MULT));
+
+const COYOTE_TIME = 0.12;
+const JUMP_BUFFER = 0.12;
+
+const PLAYER_RADIUS = 0.38 * PLAYER_SCALE;
+const PLAYER_CAPSULE_H = 1.45 * PLAYER_SCALE;
+const DOWN_FOLLOW_SPEED = 26.0 * PLAYER_SCALE;
+const MAX_STEP_UP = 0.55 * PLAYER_SCALE;
+
+const SUBSTEP_DIST = 0.35 * PLAYER_SCALE;
+
+/* =========================
+   SLOPE SPEED (GROUND ONLY)
+========================= */
+const SLOPE_SAMPLE_DIST = 1.2 * PLAYER_SCALE;
+const SLOPE_STRENGTH_UP = 0.90;
+const SLOPE_STRENGTH_DN = 0.60;
+const SLOPE_MAX_UP_PENALTY = 0.55;
+const SLOPE_MAX_DN_BOOST   = 1.30;
+
+/* =========================
+   DEAD TREES
+========================= */
+const TREE_BLOCK_PX = 16;
+const TREE_MIN_COUNT = 6;
+const TREE_MAX_INSTANCES = 9000;
+
+const TREE_SCALE = 10.0;
+
+// trunk (tapered)
+const TREE_TRUNK_H = 2.6 * TREE_SCALE;
+const TREE_TRUNK_R = 0.18 * TREE_SCALE;
+const TREE_TRUNK_TOP_R = 0.015 * TREE_SCALE;
+
+// branching params
+const BRANCHES_PER_TREE = 6;
+const BRANCH_MIN_L = 0.45 * TREE_SCALE;
+const BRANCH_MAX_L = 1.15 * TREE_SCALE;
+const BRANCH_R0    = 0.06 * TREE_SCALE;
+const BRANCH_R1    = 0.014 * TREE_SCALE;
+const BRANCH_MIN_Y = 0.35;
+const BRANCH_MAX_Y = 0.95;
+
+const TREE_HEIGHT_MIN = 0.85;
+const TREE_HEIGHT_MAX = 1.45;
+
+/* Trees: BLACK body, red light from west does the shading */
+const TREE_COLOR_TRUNK  = 0x000000;
+const TREE_COLOR_BRANCH = 0x000000;
+
+/* =========================
+   SEA (YELLOW -> RED SEA)
+   Sea level must match LOWEST points of the map (darkest green).
+========================= */
+let SEA_LEVEL = 0.0;
+const SEA_SINK_EPS = 0.14; // drop sea a hair to avoid z-fighting
+
+/* Buildings */
+const BUILD_BLOCK_PX = 128;
+const BUILD_MIN_COUNT = 35;
+const BUILD_MAX_INSTANCES = 500;
+const BUILD_SCALE = 0.3;
+const BUILD_SIZE_PX   = 75 * BUILD_SCALE * 0.8;
+const BUILD_HEIGHT_PX = 60 * BUILD_SCALE * 0.5;
+const ROOF_HEIGHT_PX  = 20 * BUILD_SCALE * 0.5;
+
+/* =========================
+   COLORS (from your PNG)
+========================= */
+const COLORS = {
+  TREE:   rgb('#8b5a2b'),
+  HOUSE:  rgb('#ff0000'),
+  PLAYER: rgb('#0000ff'),
+  BORDER: rgb('#ffff00')
+};
+
+function rgb(hex){
+  const s = hex.replace('#','');
+  return [parseInt(s.slice(0,2),16), parseInt(s.slice(2,4),16), parseInt(s.slice(4,6),16)];
+}
+function near(a,b){
+  return Math.abs(a[0]-b[0])<=TOL && Math.abs(a[1]-b[1])<=TOL && Math.abs(a[2]-b[2])<=TOL;
+}
+function isGreenish(r,g,b){
+  return (g > r + 20) && (g > b + 20);
+}
+
+/* Robust "yellow = water" detection (handles antialiasing/compression) */
+function isBorder(r,g,b){
+  return near([r,g,b], COLORS.BORDER) || (r >= 230 && g >= 230 && b <= 120);
+}
+
+function isSpecial(r,g,b){
+  // BORDER is NOT special anymore (it becomes sea).
+  return near([r,g,b], COLORS.HOUSE) ||
+         near([r,g,b], COLORS.TREE)  ||
+         near([r,g,b], COLORS.PLAYER);
+}
+
+/* =========================
+   TOON RAMPS
+========================= */
+function makeToonRamp5(stops){
+  const c = document.createElement('canvas');
+  c.width = 256; c.height = 1;
+  const ctx = c.getContext('2d');
+
+  const n = 5;
+  for (let i=0; i<n; i++){
+    ctx.fillStyle = stops[i];
+    const x0 = Math.floor((i / n) * c.width);
+    const x1 = Math.floor(((i+1) / n) * c.width);
+    ctx.fillRect(x0, 0, Math.max(1, x1-x0), 1);
+  }
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.minFilter = THREE.NearestFilter;
+  tex.magFilter = THREE.NearestFilter;
+  tex.generateMipmaps = false;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function makeToonRampWeighted(stops, weights){
+  const c = document.createElement('canvas');
+  c.width = 256; c.height = 1;
+  const ctx = c.getContext('2d');
+
+  const n = 5;
+  let sumW = 0;
+  for (let i=0; i<n; i++) sumW += weights[i] ?? (1/n);
+  let acc = 0;
+
+  for (let i=0; i<n; i++){
+    const w = (weights[i] ?? (1/n)) / Math.max(1e-6, sumW);
+    const x0 = Math.floor(acc * c.width);
+    acc += w;
+    const x1 = Math.floor(acc * c.width);
+    ctx.fillStyle = stops[i];
+    ctx.fillRect(x0, 0, Math.max(1, x1-x0), 1);
+  }
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.minFilter = THREE.NearestFilter;
+  tex.magFilter = THREE.NearestFilter;
+  tex.generateMipmaps = false;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+/* Terrain: tundra grayscale */
+const TOON_RAMP_TUNDRA = makeToonRamp5([
+  '#16161a',
+  '#2a2a31',
+  '#444452',
+  '#6f6f80',
+  '#f2f2f4'
+]);
+
+/* Sea: blood bay red */
+const TOON_RAMP_SEA_RED = makeToonRampWeighted(
+  ['#120506', '#2a0809', '#5a1213', '#b3231f', '#ff3a2a'],
+  [0.10, 0.26, 0.28, 0.22, 0.14]
+);
+
+/* =========================
+   RENDERER / SCENE
+========================= */
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true, powerPreference:'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x050508);
+scene.fog = new THREE.Fog(0x050508, 400, 2400);
+
+const camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 60000);
+camera.position.set(0, PLAYER_EYE_HEIGHT, 6);
+
+const controls = new PointerLockControls(camera, document.body);
+scene.add(controls.getObject());
+canvas.addEventListener('click', () => controls.lock());
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* =========================
+   LIGHTS
+========================= */
+/* Keep ambient low so “black” reads black, and west sun paints red */
+scene.add(new THREE.AmbientLight(0xffffff, 0.08));
+
+const sun = new THREE.DirectionalLight(0xff3a2a, 1.55);
+sun.position.set(-2200, 700, 200); // west / left / -X
+sun.target.position.set(0, 0, 0);
+scene.add(sun);
+scene.add(sun.target);
+
+// faint cool fill to keep forms readable (very low)
+const fill = new THREE.DirectionalLight(0x6aa0ff, 0.06);
+fill.position.set(900, 1200, -600);
+scene.add(fill);
+
+/* Level root */
+const levelRoot = new THREE.Group();
+scene.add(levelRoot);
+
+/* =========================
+   SKY DOME
+========================= */
+function makeSkyDome(){
+  const skyCanvas = document.createElement('canvas');
+  skyCanvas.width = 32;
+  skyCanvas.height = 256;
+  const ctx = skyCanvas.getContext('2d');
+
+  const grad = ctx.createLinearGradient(0,0,0,256);
+  grad.addColorStop(0.00, '#120506'); // deep maroon
+  grad.addColorStop(0.40, '#2a0809'); // maroon
+  grad.addColorStop(0.70, '#5a1213'); // blood mid
+  grad.addColorStop(0.90, '#b3231f'); // bright blood
+  grad.addColorStop(1.00, '#ff3a2a'); // hot highlight
+
+  ctx.fillStyle = grad;
+  ctx.fillRect(0,0,32,256);
+
+  const tex = new THREE.CanvasTexture(skyCanvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+
+  const geo = new THREE.SphereGeometry(25000, 32, 16);
+  const mat = new THREE.MeshBasicMaterial({
+  map: tex,
+  side: THREE.BackSide,
+  depthWrite: false,
+  fog: false // <- opt OUT of scene fog so the red gradient shows
+  });
+  scene.add(new THREE.Mesh(geo, mat));
+}
+makeSkyDome();
+
+function makeHorizonSun(){
+  const SUN_RADIUS = 1000;          // visual size (tweak 250–600)
+  const SUN_DIST   = 14000;        // distance from origin
+  const SUN_HEIGHT = 120;          // just above horizon
+
+  const sunGeo = new THREE.SphereGeometry(SUN_RADIUS, 32, 16);
+
+  const sunMat = new THREE.MeshBasicMaterial({
+    color: 0xff3a2a,              // same hot red as hills
+    fog: false                    // NEVER fog the sun
+  });
+
+  const sun = new THREE.Mesh(sunGeo, sunMat);
+
+  // West = negative X (matches your light direction)
+  sun.position.set(
+    -SUN_DIST,
+     SUN_HEIGHT,
+     0
+  );
+
+  scene.add(sun);
+}
+
+makeHorizonSun();
+
+/* =========================
+   INPUT
+========================= */
+const keys = new Set();
+addEventListener('keydown', e => keys.add(e.code));
+addEventListener('keyup', e => keys.delete(e.code));
+
+let jumpBufferT = 0;
+addEventListener('keydown', (e) => { if (e.code === 'Space') jumpBufferT = JUMP_BUFFER; });
+
+/* =========================
+   LEVEL DATA
+========================= */
+let mapW=0, mapH=0, cell=CELL_M, halfW=0, halfH=0;
+let heights=null;
+let waterMask=null;
+
+function idx(x,y){ return y*mapW + x; }
+function clamp(v,min,max){ return v<min?min:(v>max?max:v); }
+
+function isWaterPixel(x,y){
+  x = clamp(x,0,mapW-1);
+  y = clamp(y,0,mapH-1);
+  return waterMask && waterMask[idx(x,y)] === 1;
+}
+
+// robust world -> water: check neighborhood so antialiased edges still count
+function isWaterAtWorld(wx,wz){
+  const gx = (wx + halfW) / cell;
+  const gy = (wz + halfH) / cell;
+  const ix = Math.floor(gx);
+  const iy = Math.floor(gy);
+  return (
+    isWaterPixel(ix,iy) || isWaterPixel(ix+1,iy) || isWaterPixel(ix,iy+1) || isWaterPixel(ix+1,iy+1) ||
+    isWaterPixel(ix-1,iy) || isWaterPixel(ix,iy-1) || isWaterPixel(ix+2,iy) || isWaterPixel(ix,iy+2)
+  );
+}
+
+function heightAtGrid(ix,iy){
+  ix = clamp(ix,0,mapW-1);
+  iy = clamp(iy,0,mapH-1);
+  return heights[idx(ix,iy)];
+}
+
+function heightAtWorld(wx,wz){
+  // HARD RULE: water is always sea-level flat
+  if (isWaterAtWorld(wx,wz)) return SEA_LEVEL;
+
+  const gx = (wx + halfW) / cell;
+  const gy = (wz + halfH) / cell;
+  const ix = Math.floor(gx), iy = Math.floor(gy);
+  const fx = THREE.MathUtils.clamp(gx-ix,0,1);
+  const fy = THREE.MathUtils.clamp(gy-iy,0,1);
+  const h00=heightAtGrid(ix,iy), h10=heightAtGrid(ix+1,iy), h01=heightAtGrid(ix,iy+1), h11=heightAtGrid(ix+1,iy+1);
+  return h00*(1-fx)*(1-fy) + h10*fx*(1-fy) + h01*(1-fx)*fy + h11*fx*fy;
+}
+
+/* =========================
+   HEIGHT DERIVATION
+   Sea level = MIN land height (after smoothing), so water matches “darkest green floor”
+========================= */
+function deriveHeightsAndWater(data){
+  const h = new Float32Array(mapW*mapH);
+  const wmask = new Uint8Array(mapW*mapH);
+
+  for (let y=0; y<mapH; y++){
+    for (let x=0; x<mapW; x++){
+      const p = (y*mapW + x)*4;
+      const r=data[p], g=data[p+1], b=data[p+2], a=data[p+3];
+      const i = idx(x,y);
+
+      if (a < 16){
+        h[i] = 0;
+        wmask[i] = 0;
+        continue;
+      }
+
+      // YELLOW => WATER (height pinned later once SEA_LEVEL is computed)
+      if (isBorder(r,g,b)){
+        h[i] = NaN;
+        wmask[i] = 1;
+        continue;
+      }
+
+      // other specials become NaN (filled by neighbor sampling)
+      if (isSpecial(r,g,b)){
+        h[i] = NaN;
+        wmask[i] = 0;
+        continue;
+      }
+
+      // greenish drives elevation
+      if (isGreenish(r,g,b)){
+        const t = Math.pow(g/255, HEIGHT_CURVE_POW);
+        h[i] = t * BASE_MAX_HEIGHT;
+      } else {
+        h[i] = NaN;
+      }
+    }
+  }
+
+  // Fill NaNs by neighbor averaging
+  const dirs = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[-1,1],[1,-1],[-1,-1]];
+  for (let pass=0; pass < mapW+mapH; pass++){
+    let changed=false;
+    for (let y=0; y<mapH; y++){
+      for (let x=0; x<mapW; x++){
+        const i = idx(x,y);
+        if (!Number.isNaN(h[i])) continue;
+
+        let sum=0, cnt=0;
+        for (const [dx,dy] of dirs){
+          const nx=x+dx, ny=y+dy;
+          if (nx<0||ny<0||nx>=mapW||ny>=mapH) continue;
+          const v = h[idx(nx,ny)];
+          if (!Number.isNaN(v)){ sum+=v; cnt++; }
+        }
+        if (cnt>0){ h[i]=sum/cnt; changed=true; }
+      }
+    }
+    if (!changed) break;
+  }
+  for (let i=0; i<h.length; i++) if (Number.isNaN(h[i])) h[i]=0;
+
+  const sm = smoothHeights(h, SMOOTH_PASSES);
+
+  // Compute SEA_LEVEL as the minimum land height (exclude water pixels)
+  let minLand = Infinity;
+  for (let i=0; i<sm.length; i++){
+    if (wmask[i]) continue;
+    if (sm[i] < minLand) minLand = sm[i];
+  }
+  if (!Number.isFinite(minLand)) minLand = 0;
+  SEA_LEVEL = minLand;
+
+  // Pin water to sea level AFTER smoothing (prevents raised edges forever)
+  for (let i=0; i<sm.length; i++){
+    if (wmask[i]) sm[i] = SEA_LEVEL;
+  }
+
+  return { heights: sm, waterMask: wmask };
+}
+
+function smoothHeights(src, passes=2){
+  let a = src, b = new Float32Array(src.length);
+  for (let p=0; p<passes; p++){
+    for (let y=0; y<mapH; y++){
+      for (let x=0; x<mapW; x++){
+        let sum=0, cnt=0;
+        for (let dy=-1; dy<=1; dy++){
+          for (let dx=-1; dx<=1; dx++){
+            const nx=x+dx, ny=y+dy;
+            if (nx<0||ny<0||nx>=mapW||ny>=mapH) continue;
+            sum += a[idx(nx,ny)];
+            cnt++;
+          }
+        }
+        b[idx(x,y)] = sum / cnt;
+      }
+    }
+    const t=a; a=b; b=t;
+  }
+  return a;
+}
+
+/* =========================
+   TERRAIN + SEA MESHES
+========================= */
+let terrainMesh = null;
+let seaMesh = null;
+
+function disposeMesh(m){
+  if (!m) return;
+  m.geometry.dispose();
+  m.material.dispose();
+  levelRoot.remove(m);
+}
+
+function buildTerrainAndSeaMeshes(){
+  disposeMesh(terrainMesh); terrainMesh = null;
+  disposeMesh(seaMesh); seaMesh = null;
+
+  const sizeX = mapW * cell;
+  const sizeZ = mapH * cell;
+  halfW = sizeX/2;
+  halfH = sizeZ/2;
+
+  const segX = Math.max(1, Math.floor((mapW-1)/SAMPLE_STEP));
+  const segZ = Math.max(1, Math.floor((mapH-1)/SAMPLE_STEP));
+
+  const baseGeo = new THREE.PlaneGeometry(sizeX, sizeZ, segX, segZ);
+  baseGeo.rotateX(-Math.PI/2);
+
+  const pos = baseGeo.attributes.position;
+  const vIsWater = new Uint8Array(pos.count);
+
+  for (let i=0; i<pos.count; i++){
+    const wx = pos.getX(i);
+    const wz = pos.getZ(i);
+
+    const w = isWaterAtWorld(wx, wz) ? 1 : 0;
+    vIsWater[i] = w;
+
+    pos.setY(i, heightAtWorld(wx, wz));
+  }
+
+  const index = baseGeo.index.array;
+  const landIdx = [];
+  const seaIdx  = [];
+
+  for (let i=0; i<index.length; i+=3){
+    const a = index[i], b = index[i+1], c = index[i+2];
+    const wa = vIsWater[a], wb = vIsWater[b], wc = vIsWater[c];
+    if (wa && wb && wc) seaIdx.push(a,b,c);
+    else landIdx.push(a,b,c);
+  }
+
+  // LAND
+  const landGeo = new THREE.BufferGeometry();
+  landGeo.setAttribute('position', new THREE.BufferAttribute(pos.array.slice(), 3));
+  landGeo.setIndex(landIdx);
+  landGeo.computeVertexNormals();
+
+  const landMat = new THREE.MeshToonMaterial({
+    color: 0xffffff,
+    gradientMap: TOON_RAMP_TUNDRA,
+    fog: true
+  });
+
+  terrainMesh = new THREE.Mesh(landGeo, landMat);
+  levelRoot.add(terrainMesh);
+
+  // SEA (flattened)
+  if (seaIdx.length){
+    const seaPos = pos.array.slice();
+    for (let i=0; i<seaPos.length; i+=3){
+      seaPos[i+1] = SEA_LEVEL - SEA_SINK_EPS;
+    }
+
+    const seaGeo = new THREE.BufferGeometry();
+    seaGeo.setAttribute('position', new THREE.BufferAttribute(seaPos, 3));
+    seaGeo.setIndex(seaIdx);
+    seaGeo.computeVertexNormals();
+
+    const seaMat = new THREE.MeshToonMaterial({
+      color: 0xff3a2a,                 // visible red even without direct light
+      gradientMap: TOON_RAMP_SEA_RED,
+      emissive: 0x2a0000,
+      emissiveIntensity: 0.55,
+      fog: true
+    });
+
+    seaMesh = new THREE.Mesh(seaGeo, seaMat);
+    levelRoot.add(seaMesh);
+  }
+
+  baseGeo.dispose();
+}
+
+/* =========================
+   COLLIDERS + SPATIAL HASH
+========================= */
+const COLL_CELL = 28.0;
+const colliders = [];
+const grid = new Map();
+
+function key3(ix,iy,iz){ return `${ix},${iy},${iz}`; }
+
+function aabbForCapsule(a,b,r){
+  return {
+    min: new THREE.Vector3(Math.min(a.x,b.x)-r, Math.min(a.y,b.y)-r, Math.min(a.z,b.z)-r),
+    max: new THREE.Vector3(Math.max(a.x,b.x)+r, Math.max(a.y,b.y)+r, Math.max(a.z,b.z)+r)
+  };
+}
+function gridInsert(id, min, max){
+  const x0 = Math.floor(min.x / COLL_CELL), x1 = Math.floor(max.x / COLL_CELL);
+  const y0 = Math.floor(min.y / COLL_CELL), y1 = Math.floor(max.y / COLL_CELL);
+  const z0 = Math.floor(min.z / COLL_CELL), z1 = Math.floor(max.z / COLL_CELL);
+  for (let x=x0; x<=x1; x++){
+    for (let y=y0; y<=y1; y++){
+      for (let z=z0; z<=z1; z++){
+        const k = key3(x,y,z);
+        let arr = grid.get(k);
+        if (!arr){ arr = []; grid.set(k, arr); }
+        arr.push(id);
+      }
+    }
+  }
+}
+function rebuildColliderGrid(){
+  grid.clear();
+  for (let i=0; i<colliders.length; i++){
+    const c = colliders[i];
+    if (c.type === 'cap'){
+      const {min,max} = aabbForCapsule(c.a,c.b,c.r);
+      gridInsert(i, min, max);
+    } else {
+      gridInsert(i, c.min, c.max);
+    }
+  }
+}
+function queryNearby(min, max){
+  const out = new Set();
+  const x0 = Math.floor(min.x / COLL_CELL), x1 = Math.floor(max.x / COLL_CELL);
+  const y0 = Math.floor(min.y / COLL_CELL), y1 = Math.floor(max.y / COLL_CELL);
+  const z0 = Math.floor(min.z / COLL_CELL), z1 = Math.floor(max.z / COLL_CELL);
+  for (let x=x0; x<=x1; x++){
+    for (let y=y0; y<=y1; y++){
+      for (let z=z0; z<=z1; z++){
+        const arr = grid.get(key3(x,y,z));
+        if (!arr) continue;
+        for (const id of arr) out.add(id);
+      }
+    }
+  }
+  return out;
+}
+
+/* Player capsule */
+const _pa = new THREE.Vector3(), _pb = new THREE.Vector3();
+function getPlayerCapsule(pos){
+  const footY = pos.y - PLAYER_EYE_HEIGHT;
+  _pa.set(pos.x, footY + PLAYER_RADIUS, pos.z);
+  _pb.set(pos.x, footY + PLAYER_RADIUS + PLAYER_CAPSULE_H, pos.z);
+  return { a:_pa, b:_pb, r:PLAYER_RADIUS };
+}
+
+/* Hot-loop scratch */
+const _tmp1 = new THREE.Vector3();
+const _tmp2 = new THREE.Vector3();
+const _tmp3 = new THREE.Vector3();
+const _cpA  = new THREE.Vector3();
+const _cpB  = new THREE.Vector3();
+const _nrm  = new THREE.Vector3();
+
+function closestPtsSegSeg(a0,a1,b0,b1,outA,outB){
+  const d1 = _tmp1.subVectors(a1,a0);
+  const d2 = _tmp2.subVectors(b1,b0);
+  const r  = _tmp3.subVectors(a0,b0);
+  const a = d1.dot(d1);
+  const e = d2.dot(d2);
+  const f = d2.dot(r);
+
+  let s, t;
+  if (a <= 1e-8 && e <= 1e-8){ outA.copy(a0); outB.copy(b0); return; }
+  if (a <= 1e-8){
+    s = 0; t = THREE.MathUtils.clamp(f / e, 0, 1);
+  } else {
+    const c = d1.dot(r);
+    if (e <= 1e-8){
+      t = 0; s = THREE.MathUtils.clamp(-c / a, 0, 1);
+    } else {
+      const b = d1.dot(d2);
+      const denom = a*e - b*b;
+      s = (denom !== 0) ? THREE.MathUtils.clamp((b*f - c*e) / denom, 0, 1) : 0;
+      t = (b*s + f) / e;
+      if (t < 0){ t = 0; s = THREE.MathUtils.clamp(-c / a, 0, 1); }
+      else if (t > 1){ t = 1; s = THREE.MathUtils.clamp((b - c) / a, 0, 1); }
+    }
+  }
+  outA.copy(a0).addScaledVector(d1, s);
+  outB.copy(b0).addScaledVector(d2, t);
+}
+
+function resolveCollisions(pos){
+  const cap = getPlayerCapsule(pos);
+  const {min,max} = aabbForCapsule(cap.a, cap.b, cap.r);
+  const ids = queryNearby(min,max);
+
+  let supported = false;
+
+  for (const id of ids){
+    const c = colliders[id];
+
+    if (c.type === 'cap'){
+      closestPtsSegSeg(cap.a, cap.b, c.a, c.b, _cpA, _cpB);
+      _nrm.subVectors(_cpA, _cpB);
+      const d2 = _nrm.lengthSq();
+      const rr = cap.r + c.r;
+      if (d2 >= rr*rr || d2 < 1e-10) continue;
+
+      const d = Math.sqrt(d2);
+      _nrm.multiplyScalar(1.0/d);
+      const pen = rr - d;
+
+      pos.addScaledVector(_nrm, pen);
+      if (_nrm.y > 0.55) supported = true;
+
+    } else {
+      const pts = [cap.a, _tmp1.copy(cap.a).lerp(cap.b,0.5), cap.b];
+      let bestPen = 0;
+      _nrm.set(0,0,0);
+
+      for (const p of pts){
+        const cx = THREE.MathUtils.clamp(p.x, c.min.x, c.max.x);
+        const cy = THREE.MathUtils.clamp(p.y, c.min.y, c.max.y);
+        const cz = THREE.MathUtils.clamp(p.z, c.min.z, c.max.z);
+        _tmp2.set(cx,cy,cz);
+        _tmp3.subVectors(p, _tmp2);
+        const d2 = _tmp3.lengthSq();
+        if (d2 >= cap.r*cap.r || d2 < 1e-10) continue;
+        const d = Math.sqrt(d2);
+        const pen = cap.r - d;
+        if (pen > bestPen){
+          bestPen = pen;
+          _nrm.copy(_tmp3).multiplyScalar(1.0/d);
+        }
+      }
+
+      if (bestPen > 0){
+        pos.addScaledVector(_nrm, bestPen);
+        if (_nrm.y > 0.55) supported = true;
+      }
+    }
+  }
+
+  return supported;
+}
+
+/* =========================
+   TREES (BLACK + WEST RED SHADING)
+   Use standard lighting (not toon) so black stays black,
+   and west red directional paints the red side naturally.
+========================= */
+let treeTrunks=null;
+let treeBranches=null;
+
+function clearTrees(){
+  if (treeTrunks){
+    levelRoot.remove(treeTrunks);
+    treeTrunks.geometry.dispose();
+    treeTrunks.material.dispose();
+    treeTrunks=null;
+  }
+  if (treeBranches){
+    levelRoot.remove(treeBranches);
+    treeBranches.geometry.dispose();
+    treeBranches.material.dispose();
+    treeBranches=null;
+  }
+}
+
+function collectTreePositionsFromBitmap(data){
+  const positions = [];
+  for (let by=0; by<mapH; by+=TREE_BLOCK_PX){
+    for (let bx=0; bx<mapW; bx+=TREE_BLOCK_PX){
+      let sumX=0, sumY=0, count=0;
+      const yEnd=Math.min(by+TREE_BLOCK_PX,mapH);
+      const xEnd=Math.min(bx+TREE_BLOCK_PX,mapW);
+
+      for (let y=by; y<yEnd; y++){
+        for (let x=bx; x<xEnd; x++){
+          const p=(y*mapW+x)*4;
+          const r=data[p], g=data[p+1], b=data[p+2], a=data[p+3];
+          if (a<16) continue;
+          if (near([r,g,b], COLORS.TREE)){ sumX+=x; sumY+=y; count++; }
+        }
+      }
+
+      if (count >= TREE_MIN_COUNT){
+        const cx = sumX / count;
+        const cy = sumY / count;
+        const wx = cx*cell - halfW + cell*0.5;
+        const wz = cy*cell - halfH + cell*0.5;
+        positions.push([wx,wz]);
+        if (positions.length >= TREE_MAX_INSTANCES) return positions;
+      }
+    }
+  }
+  return positions;
+}
+
+function buildTreeInstances(positions){
+  clearTrees();
+  if (!positions.length) return;
+
+  const trunkGeo  = new THREE.CylinderGeometry(TREE_TRUNK_TOP_R, TREE_TRUNK_R, 1, 10);
+  const branchGeo = new THREE.CylinderGeometry(BRANCH_R1, BRANCH_R0, 1, 8);
+
+  const trunkMat = new THREE.MeshStandardMaterial({
+    color: TREE_COLOR_TRUNK,
+    roughness: 1.0,
+    metalness: 0.0,
+    emissive: 0x000000,         // no “brown” contamination
+    emissiveIntensity: 0.0,
+    flatShading: true
+  });
+
+  const branchMat = new THREE.MeshStandardMaterial({
+    color: TREE_COLOR_BRANCH,
+    roughness: 1.0,
+    metalness: 0.0,
+    emissive: 0x000000,
+    emissiveIntensity: 0.0,
+    flatShading: true
+  });
+
+  treeTrunks = new THREE.InstancedMesh(trunkGeo, trunkMat, positions.length);
+  treeTrunks.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+  const branchCount = positions.length * BRANCHES_PER_TREE;
+  treeBranches = new THREE.InstancedMesh(branchGeo, branchMat, branchCount);
+  treeBranches.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+  const m = new THREE.Matrix4();
+  const t = new THREE.Vector3();
+  const s = new THREE.Vector3();
+  const q = new THREE.Quaternion();
+
+  let bIdx = 0;
+
+  for (let i=0; i<positions.length; i++){
+    const [wx,wz] = positions[i];
+    const hScale = THREE.MathUtils.lerp(TREE_HEIGHT_MIN, TREE_HEIGHT_MAX, Math.random());
+    const trunkH = TREE_TRUNK_H * hScale;
+    const base = heightAtWorld(wx, wz);
+
+    // trunk
+    t.set(wx, base + trunkH*0.5, wz);
+    s.set(1, trunkH, 1);
+    q.identity();
+    m.compose(t,q,s);
+    treeTrunks.setMatrixAt(i, m);
+
+    // trunk collider capsule
+    colliders.push({
+      type:'cap',
+      a: new THREE.Vector3(wx, base + TREE_TRUNK_R, wz),
+      b: new THREE.Vector3(wx, base + trunkH - TREE_TRUNK_R, wz),
+      r: TREE_TRUNK_R * 1.05
+    });
+
+    // branches
+    for (let k=0; k<BRANCHES_PER_TREE; k++){
+      const yT = THREE.MathUtils.lerp(BRANCH_MIN_Y, BRANCH_MAX_Y, Math.random());
+      const by = base + trunkH * yT;
+
+      const len = THREE.MathUtils.lerp(BRANCH_MIN_L, BRANCH_MAX_L, Math.random()) * (1.0 - 0.10*k);
+      const thickness = THREE.MathUtils.lerp(0.75, 1.15, Math.random()) * (1.0 - 0.08*k);
+
+      const yaw   = Math.random() * Math.PI * 2;
+      const pitch = THREE.MathUtils.degToRad(20 + Math.random()*55);
+
+      q.setFromEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
+
+      const outR = (TREE_TRUNK_R + BRANCH_R0*thickness) * (0.95 + 0.35*Math.random());
+      const ox = Math.sin(yaw) * outR;
+      const oz = Math.cos(yaw) * outR;
+
+      t.set(wx + ox, by, wz + oz);
+      s.set(thickness, len, thickness);
+      m.compose(t, q, s);
+      treeBranches.setMatrixAt(bIdx++, m);
+
+      const A = new THREE.Vector3(0,-0.5,0).applyMatrix4(m);
+      const B = new THREE.Vector3(0, 0.5,0).applyMatrix4(m);
+      const br = Math.max(BRANCH_R0, BRANCH_R1) * thickness * 1.05;
+      colliders.push({ type:'cap', a:A, b:B, r: br });
+    }
+  }
+
+  treeTrunks.instanceMatrix.needsUpdate = true;
+  treeBranches.instanceMatrix.needsUpdate = true;
+
+  levelRoot.add(treeTrunks);
+  levelRoot.add(treeBranches);
+}
+
+/* =========================
+   BUILDINGS
+========================= */
+let bBodies=null, bRoofs=null;
+
+function clearBuildings(){
+  if (bBodies){
+    levelRoot.remove(bBodies);
+    bBodies.geometry.dispose();
+    bBodies.material.dispose();
+    bBodies=null;
+  }
+  if (bRoofs){
+    levelRoot.remove(bRoofs);
+    bRoofs.geometry.dispose();
+    bRoofs.material.dispose();
+    bRoofs=null;
+  }
+}
+
+function collectBuildingBlocksFromBitmap(data){
+  const entries = [];
+  const w = BUILD_SIZE_PX * cell;
+  const d = BUILD_SIZE_PX * cell;
+  const h = BUILD_HEIGHT_PX * cell;
+  const roofH = ROOF_HEIGHT_PX * cell;
+
+  for (let by=0; by<mapH; by+=BUILD_BLOCK_PX){
+    for (let bx=0; bx<mapW; bx+=BUILD_BLOCK_PX){
+      let sumX=0, sumY=0, count=0;
+      const yEnd=Math.min(by+BUILD_BLOCK_PX,mapH);
+      const xEnd=Math.min(bx+BUILD_BLOCK_PX,mapW);
+
+      for (let y=by; y<yEnd; y++){
+        for (let x=bx; x<xEnd; x++){
+          const p=(y*mapW+x)*4;
+          const r=data[p], g=data[p+1], b=data[p+2], a=data[p+3];
+          if (a<16) continue;
+          if (near([r,g,b], COLORS.HOUSE)){ sumX+=x; sumY+=y; count++; }
+        }
+      }
+
+      if (count >= BUILD_MIN_COUNT){
+        const cx=sumX/count, cy=sumY/count;
+        const wx=cx*cell - halfW + cell*0.5;
+        const wz=cy*cell - halfH + cell*0.5;
+        entries.push({ wx, wz, w, d, h, roofH });
+        if (entries.length >= BUILD_MAX_INSTANCES) return entries;
+      }
+    }
+  }
+
+  return entries;
+}
+
+function buildBuildingInstances(entries){
+  clearBuildings();
+  if (!entries.length) return;
+
+  const bodyGeo = new THREE.BoxGeometry(1,1,1);
+  const roofGeo = new THREE.ConeGeometry(1,1,4);
+  const bodyMat = new THREE.MeshBasicMaterial({ color:0xff0000 });
+  const roofMat = new THREE.MeshBasicMaterial({ color:0xaa0000 });
+
+  bBodies = new THREE.InstancedMesh(bodyGeo, bodyMat, entries.length);
+  bRoofs  = new THREE.InstancedMesh(roofGeo, roofMat, entries.length);
+
+  const m = new THREE.Matrix4();
+  const s = new THREE.Vector3();
+  const q = new THREE.Quaternion();
+  const t = new THREE.Vector3();
+
+  for (let i=0; i<entries.length; i++){
+    const {wx,wz,w,d,h,roofH} = entries[i];
+    const base = heightAtWorld(wx, wz);
+
+    t.set(wx, base + h/2, wz);
+    s.set(w,h,d);
+    q.identity();
+    m.compose(t,q,s);
+    bBodies.setMatrixAt(i, m);
+
+    t.set(wx, base + h + roofH/2, wz);
+    s.set(w*0.6, roofH, d*0.6);
+    m.compose(t, q, s);
+    bRoofs.setMatrixAt(i, m);
+
+    colliders.push({
+      type:'box',
+      min: new THREE.Vector3(wx - w/2, base,     wz - d/2),
+      max: new THREE.Vector3(wx + w/2, base + h, wz + d/2)
+    });
+  }
+
+  bBodies.instanceMatrix.needsUpdate = true;
+  bRoofs.instanceMatrix.needsUpdate  = true;
+
+  levelRoot.add(bBodies);
+  levelRoot.add(bRoofs);
+}
+
+/* =========================
+   PLAYER SPAWN
+========================= */
+function findPlayerSpawn(data){
+  for (let y=0; y<mapH; y++){
+    for (let x=0; x<mapW; x++){
+      const p=(y*mapW + x)*4;
+      const r=data[p], g=data[p+1], b=data[p+2], a=data[p+3];
+      if (a<16) continue;
+      if (near([r,g,b], COLORS.PLAYER)){
+        return { x: x*cell - halfW + cell*0.5, z: y*cell - halfH + cell*0.5 };
+      }
+    }
+  }
+  return { x: 0, z: 0 };
+}
+
+/* =========================
+   PLAYER STATE
+========================= */
+const forwardV = new THREE.Vector3();
+const rightV   = new THREE.Vector3();
+const wish     = new THREE.Vector3();
+const vel      = new THREE.Vector3();
+let grounded = false;
+let coyoteT = 0;
+let supportedByCollider = false;
+
+/* =========================
+   SLOPE SPEED helper (GROUND ONLY)
+========================= */
+function slopeSpeedMultiplierAt(x, z, moveDirXZ){
+  if (!moveDirXZ || moveDirXZ.lengthSq() < 1e-8) return 1.0;
+
+  const dx = moveDirXZ.x;
+  const dz = moveDirXZ.z;
+
+  const fX = x + dx * SLOPE_SAMPLE_DIST;
+  const fZ = z + dz * SLOPE_SAMPLE_DIST;
+  const bX = x - dx * SLOPE_SAMPLE_DIST;
+  const bZ = z - dz * SLOPE_SAMPLE_DIST;
+
+  const hF = heightAtWorld(fX, fZ);
+  const hB = heightAtWorld(bX, bZ);
+
+  const rise = (hF - hB);
+  const run  = (2.0 * SLOPE_SAMPLE_DIST);
+  const slope = rise / Math.max(1e-5, run);
+
+  if (slope > 0){
+    const penalty = 1.0 - (slope * SLOPE_STRENGTH_UP);
+    return THREE.MathUtils.clamp(penalty, SLOPE_MAX_UP_PENALTY, 1.0);
+  } else {
+    const boost = 1.0 + (-slope * SLOPE_STRENGTH_DN);
+    return THREE.MathUtils.clamp(boost, 1.0, SLOPE_MAX_DN_BOOST);
+  }
+}
+
+/* =========================
+   LOAD MAP / BUILD LEVEL
+========================= */
+async function loadLevel(){
+  levelRoot.clear();
+  colliders.length = 0;
+
+  const img = new Image();
+  img.src = MAP_URL + '?v=' + Date.now();
+  await img.decode();
+
+  const bmp = await createImageBitmap(img);
+  mapW = bmp.width;
+  mapH = bmp.height;
+  cell = CELL_M;
+
+  const sizeX = mapW * cell;
+  const sizeZ = mapH * cell;
+  halfW = sizeX/2;
+  halfH = sizeZ/2;
+
+  const c = document.createElement('canvas');
+  c.width = mapW;
+  c.height = mapH;
+  const ctx = c.getContext('2d', { willReadFrequently:true });
+  ctx.drawImage(bmp, 0, 0);
+  const data = ctx.getImageData(0,0,mapW,mapH).data;
+
+  const derived = deriveHeightsAndWater(data);
+  heights = derived.heights;
+  waterMask = derived.waterMask;
+
+  buildTerrainAndSeaMeshes();
+
+  const treePositions = collectTreePositionsFromBitmap(data);
+  buildTreeInstances(treePositions);
+
+  const buildingEntries = collectBuildingBlocksFromBitmap(data);
+  buildBuildingInstances(buildingEntries);
+
+  rebuildColliderGrid();
+
+  const sp = findPlayerSpawn(data);
+  const py = heightAtWorld(sp.x, sp.z) + PLAYER_EYE_HEIGHT;
+  controls.getObject().position.set(sp.x, py, sp.z);
+
+  vel.set(0,0,0);
+  grounded = false;
+  coyoteT = 0;
+  jumpBufferT = 0;
+}
+await loadLevel();
+
+/* =========================
+   MOVEMENT / PHYSICS STEP
+========================= */
+function updatePlayer(dt){
+  const obj = controls.getObject();
+  const pos = obj.position;
+
+  const f = (keys.has('KeyW') ? 1 : 0) - (keys.has('KeyS') ? 1 : 0);
+  const s = (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
+  const sprint = keys.has('ShiftLeft') || keys.has('ShiftRight');
+
+  camera.getWorldDirection(forwardV).setY(0).normalize();
+  rightV.crossVectors(forwardV, new THREE.Vector3(0,1,0)).normalize();
+
+  wish.set(0,0,0);
+  wish.addScaledVector(forwardV, f);
+  wish.addScaledVector(rightV, s);
+  if (wish.lengthSq() > 0) wish.normalize();
+
+  // timers
+  jumpBufferT = Math.max(0, jumpBufferT - dt);
+  coyoteT = grounded ? COYOTE_TIME : Math.max(0, coyoteT - dt);
+
+  // gravity
+  vel.y -= GRAVITY * dt;
+
+  // jump
+  if (jumpBufferT > 0 && coyoteT > 0){
+    vel.y = JUMP_VEL;
+    grounded = false;
+    coyoteT = 0;
+    jumpBufferT = 0;
+  }
+
+  // Horizontal control:
+  // - Grounded: slope affects speed (as before)
+  // - Airborne: slope DOES NOT affect speed; steer via acceleration toward target
+  if (grounded){
+    const baseSpd = sprint ? SPEED_SPRINT : SPEED_WALK;
+    const slopeMul = slopeSpeedMultiplierAt(pos.x, pos.z, wish);
+    const spd = baseSpd * slopeMul;
+    vel.x = wish.x * spd;
+    vel.z = wish.z * spd;
+  } else {
+    const maxSpd = sprint ? AIR_MAX_SPEED_SPRINT : AIR_MAX_SPEED_WALK;
+    const targetX = wish.x * maxSpd;
+    const targetZ = wish.z * maxSpd;
+
+    // accelerate toward target without any slope sampling
+    const ax = (targetX - vel.x);
+    const az = (targetZ - vel.z);
+    const aLen = Math.hypot(ax, az);
+    if (aLen > 1e-6){
+      const step = Math.min(aLen, AIR_ACCEL * dt);
+      vel.x += (ax / aLen) * step;
+      vel.z += (az / aLen) * step;
+    }
+
+    if (AIR_FRICTION > 0){
+      const fr = Math.max(0, 1.0 - AIR_FRICTION * dt);
+      vel.x *= fr; vel.z *= fr;
+    }
+  }
+
+  // substeps
+  const horizDist = Math.hypot(vel.x, vel.z) * dt;
+  const vertDist  = Math.abs(vel.y) * dt;
+  const dist = horizDist + vertDist;
+  const steps = Math.max(1, Math.ceil(dist / SUBSTEP_DIST));
+  const subDt = dt / steps;
+
+  supportedByCollider = false;
+
+  for (let i=0; i<steps; i++){
+    pos.x += vel.x * subDt;
+    pos.y += vel.y * subDt;
+    pos.z += vel.z * subDt;
+
+    pos.x = THREE.MathUtils.clamp(pos.x, -halfW+1, halfW-1);
+    pos.z = THREE.MathUtils.clamp(pos.z, -halfH+1, halfH-1);
+
+    const supported = resolveCollisions(pos);
+    if (supported) supportedByCollider = true;
+
+    const groundY = heightAtWorld(pos.x, pos.z) + PLAYER_EYE_HEIGHT;
+
+    if (groundY > pos.y && (groundY - pos.y) <= MAX_STEP_UP){
+      pos.y = groundY;
+      vel.y = Math.max(vel.y, 0);
+      grounded = true;
+      continue;
+    }
+
+    if (pos.y < groundY){
+      pos.y = groundY;
+      vel.y = Math.max(vel.y, 0);
+      grounded = true;
+      continue;
+    }
+
+    if (grounded && !supportedByCollider && pos.y > groundY){
+      const maxDown = DOWN_FOLLOW_SPEED * subDt;
+      pos.y = Math.max(groundY, pos.y - maxDown);
+      if (pos.y === groundY){
+        vel.y = Math.max(vel.y, 0);
+        grounded = true;
+      }
+    }
+
+    const gap = pos.y - groundY;
+    if (!supportedByCollider && gap <= (0.08 * PLAYER_SCALE) && vel.y <= 0){
+      pos.y = groundY;
+      vel.y = 0;
+      grounded = true;
+    } else if (!supportedByCollider && gap > (0.14 * PLAYER_SCALE)){
+      grounded = false;
+    } else if (supportedByCollider){
+      grounded = true;
+      if (vel.y < 0) vel.y = 0;
+    }
+  }
+}
+
+/* =========================
+   LOOP
+========================= */
+const clock = new THREE.Clock();
+function animate(){
+  const dt = Math.min(clock.getDelta(), 0.033);
+  if (controls.isLocked) updatePlayer(dt);
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+}
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>
