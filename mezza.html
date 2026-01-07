@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Psionic Mezza – Pixel-Pivot Rings</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: #05040a;
+    }
+
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #mezza-psionic {
+      height: 100vh;   /* match viewport height */
+      width: auto;     /* preserve aspect ratio */
+      display: block;
+    }
+  </style>
+</head>
+<body>
+
+  <svg id="mezza-psionic" xmlns="http://www.w3.org/2000/svg"></svg>
+
+  <!-- offscreen canvas for pixel scanning -->
+  <canvas id="pivotCanvas" style="display:none;"></canvas>
+
+  <script>
+    const NS = "http://www.w3.org/2000/svg";
+
+    const master = document.getElementById("mezza-psionic");
+    const canvas = document.getElementById("pivotCanvas");
+    const ctx = canvas.getContext("2d");
+
+    // Describe our assets + target pivot colors
+    const rings = [
+      {
+        name: "large",
+        file: "images/large_ring.svg",
+        color: [255, 0, 0],    // pure red pivot
+        amplitude: 30,
+        frequency: 0.25,
+        phase: 0
+      },
+      {
+        name: "medium",
+        file: "images/medium_ring.svg",
+        color: [0, 255, 0],    // pure green pivot
+        amplitude: 30,
+        frequency: 0.18,
+        phase: Math.PI / 3
+      },
+      {
+        name: "small",
+        file: "images/small_ring.svg",
+        color: [0, 0, 255],    // pure blue pivot
+        amplitude: 30,
+        frequency: 0.12,
+        phase: Math.PI / 2
+      }
+    ];
+
+    const mezzaFile = "images/mezza.svg";
+
+    // Utility: load an image (SVG file) as an <img>
+    function loadImage(url) {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = reject;
+        img.src = url;
+      });
+    }
+
+    // Scan pixels in an image for a target RGB and return centroid
+    function findPivotInImage(img, targetRGB, tolerance = 5) {
+      const [tr, tg, tb] = targetRGB;
+      const w = img.naturalWidth;
+      const h = img.naturalHeight;
+
+      canvas.width = w;
+      canvas.height = h;
+      ctx.clearRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0, w, h);
+
+      const data = ctx.getImageData(0, 0, w, h).data;
+
+      let sumX = 0;
+      let sumY = 0;
+      let count = 0;
+
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const i = 4 * (y * w + x);
+          const r = data[i];
+          const g = data[i + 1];
+          const b = data[i + 2];
+          const a = data[i + 3];
+
+          if (a < 200) continue; // ignore mostly transparent pixels
+
+          if (
+            Math.abs(r - tr) <= tolerance &&
+            Math.abs(g - tg) <= tolerance &&
+            Math.abs(b - tb) <= tolerance
+          ) {
+            sumX += x;
+            sumY += y;
+            count++;
+          }
+        }
+      }
+
+      if (!count) {
+        console.warn("No pivot pixels found for color", targetRGB, "in image", img.src);
+        return { cx: w / 2, cy: h / 2 }; // fallback: center of image
+      }
+
+      const cx = sumX / count;
+      const cy = sumY / count;
+      console.log("Pivot for", img.src, "at", { cx, cy }, "from", count, "pixels");
+      return { cx, cy };
+    }
+
+    (async () => {
+      try {
+        // Load all ring images and Mezza
+        const ringImages = await Promise.all(rings.map(r => loadImage(r.file)));
+        const mezzaImage = await loadImage(mezzaFile);
+
+        // Assume all share the same canvas size (your exports do)
+        const W = mezzaImage.naturalWidth;
+        const H = mezzaImage.naturalHeight;
+
+        master.setAttribute("viewBox", `0 0 ${W} ${H}`);
+        master.setAttribute("preserveAspectRatio", "xMidYMid meet");
+        master.removeAttribute("width");
+        master.removeAttribute("height");
+        master.style.height = "100vh";
+        master.style.width = "auto";
+
+        // Build SVG <image> layers: small → medium → large → Mezza
+        const layers = [];
+
+        // For each ring, find pivot via pixel scan and create <image>
+        rings.forEach((ring, idx) => {
+          const img = ringImages[idx];
+          const { cx, cy } = findPivotInImage(img, ring.color);
+
+          const imageEl = document.createElementNS(NS, "image");
+          // modern browsers accept plain href on SVG <image>
+          imageEl.setAttribute("href", ring.file);
+          imageEl.setAttribute("x", "0");
+          imageEl.setAttribute("y", "0");
+          imageEl.setAttribute("width", W);
+          imageEl.setAttribute("height", H);
+
+          master.appendChild(imageEl);
+
+          layers.push({
+            type: "ring",
+            element: imageEl,
+            cx,
+            cy,
+            amplitude: ring.amplitude,
+            frequency: ring.frequency,
+            phase: ring.phase
+          });
+        });
+
+        // Add Mezza on top as a simple <image>
+        const mezzaEl = document.createElementNS(NS, "image");
+        mezzaEl.setAttribute("href", mezzaFile);
+        mezzaEl.setAttribute("x", "0");
+        mezzaEl.setAttribute("y", "0");
+        mezzaEl.setAttribute("width", W);
+        mezzaEl.setAttribute("height", H);
+        master.appendChild(mezzaEl);
+
+        // Animate the rings with a smooth psionic wobble
+        let start = null;
+
+        function animate(ts) {
+          if (!start) start = ts;
+          const t = (ts - start) / 1000; // seconds
+
+          for (const layer of layers) {
+            const { element, cx, cy, amplitude, frequency, phase } = layer;
+            const angle = amplitude * Math.sin(2 * Math.PI * frequency * t + phase);
+            element.setAttribute("transform", `rotate(${angle} ${cx} ${cy})`);
+          }
+
+          requestAnimationFrame(animate);
+        }
+
+        requestAnimationFrame(animate);
+      } catch (err) {
+        console.error("Error building psionic scene:", err);
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Single Image Color Probe</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background: #0b0b12;
+      color: #f7f7ff;
+      font-family: system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 20px;
+      padding: 20px;
+    }
+
+    #imgView {
+      max-width: 80vw;
+      max-height: 80vh;
+      border: 1px solid #333;
+      background: #000;
+      cursor: crosshair;
+      display: none;
+    }
+
+    #debug {
+      font-family: ui-monospace, monospace;
+      white-space: pre-wrap;
+      border-top: 1px solid #444;
+      padding-top: 10px;
+      width: 100%;
+      max-width: 700px;
+    }
+
+    canvas { display: none; }
+  </style>
+</head>
+
+<body>
+
+  <h2>Color Probe</h2>
+
+  <input type="file" id="fileInput" accept="image/*,.svg" />
+
+  <img id="imgView" alt="Loaded image"/>
+
+  <div id="debug">Load an image, then click anywhere on it to sample the color.</div>
+
+  <canvas id="probeCanvas"></canvas>
+
+  <script>
+    const fileInput = document.getElementById("fileInput");
+    const img = document.getElementById("imgView");
+    const debug = document.getElementById("debug");
+    const canvas = document.getElementById("probeCanvas");
+    const ctx = canvas.getContext("2d");
+
+    let currentFileName = "(none)";
+
+    function log(msg) {
+      debug.textContent = msg;
+      console.log(msg);
+    }
+
+    // Load any file the user selects
+    fileInput.addEventListener("change", e => {
+      const file = fileInput.files[0];
+      if (!file) return;
+
+      currentFileName = file.name;
+      const url = URL.createObjectURL(file);
+
+      img.onload = () => {
+        img.style.display = "block";
+        log(
+          `Image loaded: ${currentFileName}\n` +
+          `Click anywhere on the image to sample the color.`
+        );
+      };
+
+      img.src = url;
+    });
+
+    // Handle clicks on image
+    img.addEventListener("click", e => {
+      const rect = img.getBoundingClientRect();
+
+      // click location relative to image element
+      const rx = e.clientX - rect.left;
+      const ry = e.clientY - rect.top;
+
+      // map click to actual pixel in original image
+      const scaleX = img.naturalWidth  / rect.width;
+      const scaleY = img.naturalHeight / rect.height;
+
+      const px = Math.floor(rx * scaleX);
+      const py = Math.floor(ry * scaleY);
+
+      // Draw image into canvas buffer
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      ctx.drawImage(img, 0, 0);
+
+      // Read pixel safely
+      let r=0,g=0,b=0,a=0;
+      try {
+        const data = ctx.getImageData(px, py, 1, 1).data;
+        [r,g,b,a] = data;
+      } catch (err) {
+        log(
+          `Image: ${currentFileName}\n` +
+          `Error reading pixel (likely CORS / file URL issue). Use a local server.\n` +
+          `${err}`
+        );
+        return;
+      }
+
+      const hex = "#" + [r,g,b].map(v => v.toString(16).padStart(2,"0")).join("");
+      const rgbaStr = `rgba(${r}, ${g}, ${b}, ${(a/255).toFixed(2)})`;
+
+      log(
+        `Image: ${currentFileName}\n\n` +
+        `Color:\n` +
+        `  RGBA: ${rgbaStr}\n` +
+        `  Hex:  ${hex}\n\n` +
+        `You can hardcode this color as a pivot-blob signature going forward.`
+      );
+    });
+  </script>
+</body>
+</html>
