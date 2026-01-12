@@ -1,0 +1,6 @@
+# Ignore all binary/large asset drops
+/assets/
+/assets/**
+
+# (Optional) If you keep a placeholder file so the folder exists:
+!/assets/.gitkeep

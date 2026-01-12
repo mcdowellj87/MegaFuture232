@@ -13,28 +13,61 @@
     color:#c9c9d2; background:rgba(0,0,0,.35);
     padding:8px 10px; border-radius:10px;
     user-select:none; pointer-events:none;
+    white-space: pre;
   }
+  #devConsole {
+    position: fixed;
+    left: 12px;
+    bottom: 12px;
+    width: min(520px, calc(100vw - 24px));
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: rgba(0,0,0,.55);
+    backdrop-filter: blur(6px);
+    color: #d8d8e0;
+    font: 13px/1.3 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    border: 1px solid rgba(255,255,255,.10);
+    display: none;           /* hidden by default */
+    pointer-events: none;    /* so it never steals mouse */
+    user-select: none;
+    white-space: pre;
+  }
+  #devConsole .row { display:flex; gap:8px; align-items:center; }
+  #devConsole .prompt { opacity: .7; }
+  #devConsole .input { flex: 1; }
+  #devConsole .help  { margin-top: 6px; opacity: .55; font-size: 12px; }
 </style>
 
 <script type="importmap">
 {
-  "imports": { "three": "./vendor/three.module.js" }
+  "imports": {
+    "three": "./vendor/three.module.js"
+  }
 }
 </script>
 </head>
 
 <body>
 <div id="hint">Click to lock • WASD move • Shift sprint • Space jump</div>
+<div id="devConsole">
+  <div class="row">
+    <div class="prompt">&gt;</div>
+    <div class="input" id="devConsoleInput"></div>
+  </div>
+  <div class="help">Tab to close • Enter to run</div>
+</div>
 <canvas id="c"></canvas>
 
 <script type="module">
 import * as THREE from 'three';
-import { PointerLockControls } from './vendor/PointerLockControls.js';
+import { GLTFLoader } from './vendor/GLTFLoader.js';
 
 /* =========================
    FILES
 ========================= */
 const MAP_URL = './images/map.png';
+const MEZZA_WALK_GLB = './assets/mezza_walking.glb';
+const MEZZA_RUN_GLB  = './assets/mezza_running.glb';
 
 /* =========================
    WORLD TUNING
@@ -104,6 +137,33 @@ const FLOOR_Y = -99999;
 /* Sky/water size sync */
 const SKY_RADIUS = 25000;
 const WATER_PLANE_SIZE = SKY_RADIUS * 2.0;
+
+/* =========================
+   THIRD PERSON CAMERA
+========================= */
+let VIEW_MODE = 'first'; // 'first' | 'third'
+let THIRD_CAM_BACK   = 9.0 * PLAYER_SCALE; // <-- mutable for mousewheel zoom
+const THIRD_CAM_BACK_MIN = 2.2 * PLAYER_SCALE;
+const THIRD_CAM_BACK_MAX = 40.0 * PLAYER_SCALE;
+const THIRD_CAM_ZOOM_SPEED = 0.02 * PLAYER_SCALE;
+
+const THIRD_CAM_UP     = 3.2 * PLAYER_SCALE;
+const THIRD_LOOK_UP    = 1.35 * PLAYER_SCALE; // look-at height above ground
+const THIRD_COLLIDE_PADDING = 0.22;
+
+/* =========================
+   MOUSE LOOK (pointer lock)
+========================= */
+let isLocked = false;
+let yaw = 0;    // radians
+let pitch = 0;  // radians
+const MOUSE_SENS = 0.0022;
+const PITCH_MIN = THREE.MathUtils.degToRad(-80);
+const PITCH_MAX = THREE.MathUtils.degToRad( 80);
+
+function applyCameraRotation(){
+  camera.rotation.set(pitch, yaw, 0, 'YXZ');
+}
 
 /* =========================
    TREE PARAMS (needed by blob-literal trees)
@@ -243,17 +303,44 @@ scene.background = new THREE.Color(0x120506);
 scene.fog = new THREE.Fog(0x2a0809, 8000, 30000);
 
 const camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 60000);
-camera.position.set(0, PLAYER_EYE_HEIGHT, 6);
-
-const controls = new PointerLockControls(camera, document.body);
-scene.add(controls.getObject());
-canvas.addEventListener('click', () => controls.lock());
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth/innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 });
+
+/* =========================
+   POINTER LOCK + MOUSE LOOK
+========================= */
+function lockPointer(){
+  if (!document.pointerLockElement) canvas.requestPointerLock();
+}
+canvas.addEventListener('click', lockPointer);
+
+document.addEventListener('pointerlockchange', () => {
+  isLocked = (document.pointerLockElement === canvas);
+});
+
+document.addEventListener('mousemove', (e) => {
+  if (!isLocked) return;
+  yaw   -= e.movementX * MOUSE_SENS;
+  pitch -= e.movementY * MOUSE_SENS;
+  pitch = THREE.MathUtils.clamp(pitch, PITCH_MIN, PITCH_MAX);
+});
+
+/* Mousewheel zoom (third-person only) */
+addEventListener('wheel', (e) => {
+  if (VIEW_MODE !== 'third') return;
+
+  THIRD_CAM_BACK = THREE.MathUtils.clamp(
+    THIRD_CAM_BACK + e.deltaY * THIRD_CAM_ZOOM_SPEED,
+    THIRD_CAM_BACK_MIN,
+    THIRD_CAM_BACK_MAX
+  );
+
+  e.preventDefault();
+}, { passive: false });
 
 /* =========================
    LIGHTS
@@ -323,9 +410,7 @@ function makeHorizonSun(){
 function updateHorizonSunPosition(dist){
   if (!horizonSunMesh) return;
 
-  // Direction is from origin toward the directional light position
-  const dir = sun.position.clone().normalize(); // points toward the light
-  // Put the disc out on the sky near the horizon in that same direction
+  const dir = sun.position.clone().normalize();
   horizonSunMesh.position.copy(dir.multiplyScalar(dist));
 }
 makeHorizonSun();
@@ -334,11 +419,90 @@ makeHorizonSun();
    INPUT
 ========================= */
 const keys = new Set();
-addEventListener('keydown', e => keys.add(e.code));
+addEventListener('keydown', e => {
+  keys.add(e.code);
+
+  if (e.code === 'Space') jumpBufferT = JUMP_BUFFER;
+});
 addEventListener('keyup', e => keys.delete(e.code));
 
+/* =========================
+   HIDDEN DEV CONSOLE (Tab)
+========================= */
+const devConsoleEl = document.getElementById('devConsole');
+const devConsoleInputEl = document.getElementById('devConsoleInput');
+
+let devConsoleOpen = false;
+let devBuffer = '';
+
+function openDevConsole(){
+  devConsoleOpen = true;
+  devBuffer = '';
+  devConsoleInputEl.textContent = '';
+  devConsoleEl.style.display = 'block';
+}
+function closeDevConsole(){
+  devConsoleOpen = false;
+  devBuffer = '';
+  devConsoleInputEl.textContent = '';
+  devConsoleEl.style.display = 'none';
+}
+
+function runDevCommand(cmdRaw){
+  const cmd = cmdRaw.trim().toLowerCase();
+
+  if (cmd === 'superflea'){
+    // Ensure avatar exists even if ./assets/ is missing
+    ensureMezzaReady();
+    VIEW_MODE = (VIEW_MODE === 'third') ? 'first' : 'third';
+  }
+}
+
+/* Capture typing when console is open */
+addEventListener('keydown', (e) => {
+  // Tab toggles console (hidden feature)
+  if (e.code === 'Tab'){
+    e.preventDefault();
+
+    if (!devConsoleOpen) openDevConsole();
+    else closeDevConsole();
+
+    return;
+  }
+
+  if (!devConsoleOpen) return;
+
+  // While open: prevent gameplay input from firing
+  e.preventDefault();
+  e.stopPropagation();
+
+  if (e.code === 'Escape'){
+    closeDevConsole();
+    return;
+  }
+
+  if (e.code === 'Enter'){
+    runDevCommand(devBuffer);
+    closeDevConsole();
+    return;
+  }
+
+  if (e.code === 'Backspace'){
+    devBuffer = devBuffer.slice(0, -1);
+    devConsoleInputEl.textContent = devBuffer;
+    return;
+  }
+
+  // Accept printable characters
+  if (e.key && e.key.length === 1){
+    // avoid weird control chars
+    if (e.ctrlKey || e.metaKey) return;
+    devBuffer += e.key;
+    devConsoleInputEl.textContent = devBuffer;
+  }
+}, { capture: true });
+
 let jumpBufferT = 0;
-addEventListener('keydown', (e) => { if (e.code === 'Space') jumpBufferT = JUMP_BUFFER; });
 
 /* =========================
    LEVEL DATA
@@ -489,7 +653,6 @@ function deriveHeightsAndWater(data){
 
   sm = smoothHeightsLandOnlyLocked(sm, wmask, topMask, SLOPE_PASSES);
 
-  // compute MAX_LAND_HEIGHT (tallest land)
   let maxH = 0;
   for (let i=0; i<sm.length; i++){
     if (wmask[i]) continue;
@@ -967,14 +1130,14 @@ function buildTreeInstancesFromBlobs(blobs){
       const len = THREE.MathUtils.lerp(BRANCH_MIN_L_BASE, BRANCH_MAX_L_BASE, Math.random()) * heightScale * (1.0 - 0.10*k);
       const thickness = THREE.MathUtils.lerp(0.75, 1.15, Math.random()) * radiusScale * (1.0 - 0.08*k);
 
-      const yaw   = Math.random() * Math.PI * 2;
-      const pitch = THREE.MathUtils.degToRad(20 + Math.random()*55);
+      const yawR   = Math.random() * Math.PI * 2;
+      const pitchR = THREE.MathUtils.degToRad(20 + Math.random()*55);
 
-      q.setFromEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
+      q.setFromEuler(new THREE.Euler(pitchR, yawR, 0, 'YXZ'));
 
       const outR = (trunkR + (BRANCH_R0_BASE * thickness)) * (0.95 + 0.35*Math.random());
-      const ox = Math.sin(yaw) * outR;
-      const oz = Math.cos(yaw) * outR;
+      const ox = Math.sin(yawR) * outR;
+      const oz = Math.cos(yawR) * outR;
 
       t.set(wx + ox, by, wz + oz);
       s.set(thickness, len, thickness);
@@ -1224,11 +1387,10 @@ function simplifyRDP2D(points, eps){
 
 /* =========================
    BRIDGE (LONG PRISM FROM #c0c0c0)
-   Width = gray stripe thickness in the image (vertical thickness => world Z width)
 ========================= */
 let bridgeMesh = null;
 
-const BRIDGE_TOL = 10; // keep tight to avoid eating terrain greys
+const BRIDGE_TOL = 10;
 function isBridgePixel(r,g,b,a){
   if (a < 16) return false;
   return Math.abs(r - 192) <= BRIDGE_TOL &&
@@ -1243,7 +1405,6 @@ function median(arr){
   return (a.length % 2) ? a[mid] : (a[mid-1] + a[mid]) * 0.5;
 }
 
-// Detect a vertical stripe: per-column thickness => median width + median centerline.
 function collectBridgeBandFromBitmap(data){
   const cols = [];
   let minX = Infinity;
@@ -1297,7 +1458,7 @@ function buildBridgePrism(band){
   const bridgeWidthZ = Math.max(0.75, band.widthPx * cell);
 
   const xStart = band.startX * cell - halfW;
-  const xEnd   = SKY_RADIUS; // extend to the east skydome edge
+  const xEnd   = SKY_RADIUS;
   const bridgeLengthX = xEnd - xStart;
 
   const zCenter = (band.centerY * cell - halfH) + cell * 0.5;
@@ -1330,6 +1491,138 @@ function buildBridgePrism(band){
 }
 
 /* =========================
+   ASSET-SAFE LOADING + FALLBACK AVATAR
+========================= */
+function isUnderAssets(url){
+  return typeof url === 'string' && url.includes('/assets/');
+}
+
+async function safeLoad(label, url, loaderFn){
+  try{
+    return await loaderFn(url);
+  }catch(err){
+    if (isUnderAssets(url)){
+      console.warn(`[assets] failed to load ${label}: ${url}`, err);
+      return null;
+    }
+    console.warn(`[load] failed to load ${label}: ${url}`, err);
+    return null;
+  }
+}
+
+// Player-ish sized black prism stand-in
+function makeFallbackMezzaPrism(){
+  const bodyH = (PLAYER_CAPSULE_H + (PLAYER_RADIUS * 2.0));
+  const bodyW = (PLAYER_RADIUS * 2.0) * 1.05;
+  const bodyD = (PLAYER_RADIUS * 2.0) * 0.85;
+
+  const geo = new THREE.BoxGeometry(bodyW, bodyH, bodyD);
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0x000000,
+    roughness: 0.95,
+    metalness: 0.0,
+    emissive: 0x050000,
+    emissiveIntensity: 0.35
+  });
+
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.castShadow = false;
+  mesh.receiveShadow = false;
+  mesh.position.y = bodyH * 0.5;
+
+  const g = new THREE.Group();
+  g.add(mesh);
+  return g;
+}
+
+let mezzaFallbackBuilt = false;
+function ensureMezzaReady(){
+  if (mezzaWalk || mezzaRun || mezzaFallbackBuilt) return;
+
+  mezzaWalk = makeFallbackMezzaPrism();
+  mezzaRun  = makeFallbackMezzaPrism();
+  mezzaRun.visible = false;
+
+  mezzaRoot.add(mezzaWalk);
+  mezzaRoot.add(mezzaRun);
+
+  mezzaWalkMixer = null;
+  mezzaRunMixer  = null;
+  mezzaWalkAction = null;
+  mezzaRunAction  = null;
+
+  mezzaFallbackBuilt = true;
+}
+
+/* =========================
+   MEZZA (3rd PERSON CHARACTER)
+========================= */
+const mezzaRoot = new THREE.Group();
+scene.add(mezzaRoot);
+
+let mezzaWalk = null;
+let mezzaRun  = null;
+let mezzaWalkMixer = null;
+let mezzaRunMixer  = null;
+let mezzaWalkAction = null;
+let mezzaRunAction  = null;
+
+const loader = new GLTFLoader();
+
+async function loadMezza(){
+  // Walking (also used for idle)
+  const gltfWalk = await safeLoad('Mezza walk GLB', MEZZA_WALK_GLB, (u) => loader.loadAsync(u));
+  if (gltfWalk && gltfWalk.scene){
+    mezzaWalk = gltfWalk.scene;
+    mezzaWalk.traverse(o => { if (o.isMesh){ o.castShadow = false; o.receiveShadow = false; } });
+    mezzaRoot.add(mezzaWalk);
+
+    mezzaWalkMixer = new THREE.AnimationMixer(mezzaWalk);
+    if (gltfWalk.animations && gltfWalk.animations.length){
+      mezzaWalkAction = mezzaWalkMixer.clipAction(gltfWalk.animations[0]);
+      mezzaWalkAction.play();
+    }
+  } else {
+    mezzaWalk = makeFallbackMezzaPrism();
+    mezzaRoot.add(mezzaWalk);
+    mezzaWalkMixer = null;
+    mezzaWalkAction = null;
+  }
+
+  // Running (separate GLB, swap visible)
+  const gltfRun = await safeLoad('Mezza run GLB', MEZZA_RUN_GLB, (u) => loader.loadAsync(u));
+  if (gltfRun && gltfRun.scene){
+    mezzaRun = gltfRun.scene;
+    mezzaRun.traverse(o => { if (o.isMesh){ o.castShadow = false; o.receiveShadow = false; } });
+    mezzaRun.visible = false;
+    mezzaRoot.add(mezzaRun);
+
+    mezzaRunMixer = new THREE.AnimationMixer(mezzaRun);
+    if (gltfRun.animations && gltfRun.animations.length){
+      mezzaRunAction = mezzaRunMixer.clipAction(gltfRun.animations[0]);
+      mezzaRunAction.play();
+    }
+  } else {
+    mezzaRun = makeFallbackMezzaPrism();
+    mezzaRun.visible = false;
+    mezzaRoot.add(mezzaRun);
+    mezzaRunMixer = null;
+    mezzaRunAction = null;
+  }
+}
+
+function setMezzaMode(isRunning){
+  ensureMezzaReady();
+  if (!mezzaWalk || !mezzaRun) return;
+  mezzaWalk.visible = !isRunning;
+  mezzaRun.visible  =  isRunning;
+}
+
+function setMezzaVisible(vis){
+  mezzaRoot.visible = vis;
+}
+
+/* =========================
    PLAYER SPAWN
 ========================= */
 function findPlayerSpawn(data){
@@ -1353,6 +1646,8 @@ const forwardV = new THREE.Vector3();
 const rightV   = new THREE.Vector3();
 const wish     = new THREE.Vector3();
 const vel      = new THREE.Vector3();
+const playerPos = new THREE.Vector3(0, PLAYER_EYE_HEIGHT, 6);
+
 let grounded = false;
 let coyoteT = 0;
 let supportedByCollider = false;
@@ -1429,7 +1724,6 @@ async function loadLevel(){
 
   buildBuildingPerimeterFromBitmap(data);
 
-  // Bridge
   const bridgeBand = collectBridgeBandFromBitmap(data);
   buildBridgePrism(bridgeBand);
 
@@ -1437,34 +1731,57 @@ async function loadLevel(){
 
   const sp = findPlayerSpawn(data);
   const py = Math.max(heightAtWorld(sp.x, sp.z), SEA_LEVEL) + PLAYER_EYE_HEIGHT;
-  controls.getObject().position.set(sp.x, py, sp.z);
+  playerPos.set(sp.x, py, sp.z);
 
   vel.set(0,0,0);
   grounded = false;
   coyoteT = 0;
   jumpBufferT = 0;
 }
+
 await loadLevel();
+await loadMezza(); // if it fails, fallback prisms are used
 
 /* =========================
    MOVEMENT / PHYSICS STEP
 ========================= */
 function updatePlayer(dt){
-  const obj = controls.getObject();
-  const pos = obj.position;
-
   const f = (keys.has('KeyW') ? 1 : 0) - (keys.has('KeyS') ? 1 : 0);
   const s = (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
   const sprint = keys.has('ShiftLeft') || keys.has('ShiftRight');
 
-  camera.getWorldDirection(forwardV).setY(0).normalize();
-  rightV.crossVectors(forwardV, new THREE.Vector3(0,1,0)).normalize();
+  // Reuse a single UP vector (no per-frame allocations)
+  const UP = (updatePlayer._UP ||= new THREE.Vector3(0,1,0));
 
+  // -------------------------
+  // Movement basis
+  // -------------------------
+  if (VIEW_MODE === 'third') {
+    // Third-person: move relative to camera facing projected on XZ
+    camera.getWorldDirection(forwardV);
+    forwardV.y = 0;
+    if (forwardV.lengthSq() < 1e-8) forwardV.set(0, 0, -1);
+    forwardV.normalize();
+
+    // ✅ right = forward × up  (fixes A/D)
+    rightV.crossVectors(forwardV, UP).normalize();
+  } else {
+    // First-person: classic FPS forward (Three.js forward at yaw=0 is -Z)
+    forwardV.set(-Math.sin(yaw), 0, -Math.cos(yaw)).normalize();
+
+    // ✅ right = forward × up  (fixes A/D)
+    rightV.crossVectors(forwardV, UP).normalize();
+  }
+
+  // Build wish direction
   wish.set(0,0,0);
   wish.addScaledVector(forwardV, f);
   wish.addScaledVector(rightV, s);
   if (wish.lengthSq() > 0) wish.normalize();
 
+  // -------------------------
+  // Jump + gravity
+  // -------------------------
   jumpBufferT = Math.max(0, jumpBufferT - dt);
   coyoteT = grounded ? COYOTE_TIME : Math.max(0, coyoteT - dt);
 
@@ -1477,9 +1794,12 @@ function updatePlayer(dt){
     jumpBufferT = 0;
   }
 
+  // -------------------------
+  // Horizontal motion
+  // -------------------------
   if (grounded){
     const baseSpd = sprint ? SPEED_SPRINT : SPEED_WALK;
-    const slopeMul = slopeSpeedMultiplierAt(pos.x, pos.z, wish);
+    const slopeMul = slopeSpeedMultiplierAt(playerPos.x, playerPos.z, wish);
     const spd = baseSpd * slopeMul;
     vel.x = wish.x * spd;
     vel.z = wish.z * spd;
@@ -1503,6 +1823,9 @@ function updatePlayer(dt){
     }
   }
 
+  // -------------------------
+  // Substep + collision
+  // -------------------------
   const horizDist = Math.hypot(vel.x, vel.z) * dt;
   const vertDist  = Math.abs(vel.y) * dt;
   const dist = horizDist + vertDist;
@@ -1513,39 +1836,39 @@ function updatePlayer(dt){
   const seaFloorY = SEA_LEVEL + PLAYER_EYE_HEIGHT;
 
   for (let i=0; i<steps; i++){
-    pos.x += vel.x * subDt;
-    pos.y += vel.y * subDt;
-    pos.z += vel.z * subDt;
+    playerPos.x += vel.x * subDt;
+    playerPos.y += vel.y * subDt;
+    playerPos.z += vel.z * subDt;
 
-    pos.x = THREE.MathUtils.clamp(pos.x, -halfW+1, halfW-1);
-    pos.z = THREE.MathUtils.clamp(pos.z, -halfH+1, halfH-1);
+    playerPos.x = THREE.MathUtils.clamp(playerPos.x, -halfW+1, halfW-1);
+    playerPos.z = THREE.MathUtils.clamp(playerPos.z, -halfH+1, halfH-1);
 
-    const supported = resolveCollisions(pos);
+    const supported = resolveCollisions(playerPos);
     if (supported) supportedByCollider = true;
 
-    const groundY = heightAtWorld(pos.x, pos.z) + PLAYER_EYE_HEIGHT;
+    const groundY = heightAtWorld(playerPos.x, playerPos.z) + PLAYER_EYE_HEIGHT;
 
-    if (groundY > pos.y && (groundY - pos.y) <= MAX_STEP_UP){
-      pos.y = groundY;
+    if (groundY > playerPos.y && (groundY - playerPos.y) <= MAX_STEP_UP){
+      playerPos.y = groundY;
       vel.y = Math.max(vel.y, 0);
       grounded = true;
-    } else if (pos.y < groundY){
-      pos.y = groundY;
+    } else if (playerPos.y < groundY){
+      playerPos.y = groundY;
       vel.y = Math.max(vel.y, 0);
       grounded = true;
     } else {
-      if (grounded && !supportedByCollider && pos.y > groundY){
+      if (grounded && !supportedByCollider && playerPos.y > groundY){
         const maxDown = DOWN_FOLLOW_SPEED * subDt;
-        pos.y = Math.max(groundY, pos.y - maxDown);
-        if (pos.y === groundY){
+        playerPos.y = Math.max(groundY, playerPos.y - maxDown);
+        if (playerPos.y === groundY){
           vel.y = Math.max(vel.y, 0);
           grounded = true;
         }
       }
 
-      const gap = pos.y - groundY;
+      const gap = playerPos.y - groundY;
       if (!supportedByCollider && gap <= (0.08 * PLAYER_SCALE) && vel.y <= 0){
-        pos.y = groundY;
+        playerPos.y = groundY;
         vel.y = 0;
         grounded = true;
       } else if (!supportedByCollider && gap > (0.14 * PLAYER_SCALE)){
@@ -1556,12 +1879,82 @@ function updatePlayer(dt){
       }
     }
 
-    if (pos.y < seaFloorY){
-      pos.y = seaFloorY;
+    if (playerPos.y < seaFloorY){
+      playerPos.y = seaFloorY;
       if (vel.y < 0) vel.y = 0;
       grounded = true;
     }
   }
+}
+
+/* =========================
+   CAMERA + MEZZA SYNC
+========================= */
+const camPos = new THREE.Vector3();
+const camTarget = new THREE.Vector3();
+const desiredCam = new THREE.Vector3();
+const tmpRayDir = new THREE.Vector3();
+
+function updateMezzaAndCamera(dt){
+  // Always guarantee avatar exists (even if assets fail, or toggled later)
+  ensureMezzaReady();
+
+  applyCameraRotation();
+
+  const sprint = keys.has('ShiftLeft') || keys.has('ShiftRight');
+  const moving = (keys.has('KeyW') || keys.has('KeyA') || keys.has('KeyS') || keys.has('KeyD'));
+
+  // Switch models: walking GLB for idle+walk, running GLB for sprint+move
+  setMezzaMode(sprint && moving);
+
+  // Mezza follows the capsule feet so jump is visible (not locked to terrain height)
+  const footY = playerPos.y - PLAYER_EYE_HEIGHT;
+  mezzaRoot.position.set(playerPos.x, footY, playerPos.z);
+
+  // Rotate Mezza to face movement direction when moving,
+  // otherwise face camera yaw (so you can pose/aim).
+  if (moving){
+    // direction from wish vector (already normalized)
+    const ang = Math.atan2(wish.x, wish.z);
+    mezzaRoot.rotation.set(0, ang, 0);
+  } else {
+    mezzaRoot.rotation.set(0, yaw, 0);
+  }
+
+  // Mezza visibility: hide in first-person so she doesn't block view
+  setMezzaVisible(VIEW_MODE === 'third');
+
+  // Update mixers (safe even when null)
+  if (mezzaWalkMixer && mezzaWalk && mezzaWalk.visible) mezzaWalkMixer.update(dt);
+  if (mezzaRunMixer  && mezzaRun  && mezzaRun.visible)  mezzaRunMixer.update(dt);
+
+  if (VIEW_MODE === 'first'){
+    // First-person camera at player eye
+    camera.position.set(playerPos.x, playerPos.y, playerPos.z);
+    return;
+  }
+
+  // Third-person follow camera
+  const back = THIRD_CAM_BACK;
+  const up   = THIRD_CAM_UP + (Math.sin(pitch) * 0.4 * PLAYER_SCALE);
+
+  // desired camera position (behind player based on yaw)
+  desiredCam.set(
+    playerPos.x - Math.sin(yaw) * back,
+    (heightAtWorld(playerPos.x, playerPos.z) + up),
+    playerPos.z - Math.cos(yaw) * back
+  );
+
+  // Look-at target
+  camTarget.set(playerPos.x, heightAtWorld(playerPos.x, playerPos.z) + THIRD_LOOK_UP, playerPos.z);
+
+  // Optional simple anti-clipping: if desiredCam is "inside ground", lift it
+  const camGround = heightAtWorld(desiredCam.x, desiredCam.z) + 0.65;
+  if (desiredCam.y < camGround) desiredCam.y = camGround;
+
+  // Smooth camera
+  camera.position.lerp(desiredCam, 1.0 - Math.pow(0.000001, dt));
+  camera.lookAt(camTarget);
 }
 
 /* =========================
@@ -1570,7 +1963,13 @@ function updatePlayer(dt){
 const clock = new THREE.Clock();
 function animate(){
   const dt = Math.min(clock.getDelta(), 0.033);
-  if (controls.isLocked) updatePlayer(dt);
+
+  if (isLocked){
+    updatePlayer(dt);
+  }
+
+  updateMezzaAndCamera(dt);
+
   renderer.render(scene, camera);
   requestAnimationFrame(animate);
 }
