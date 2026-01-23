@@ -184,6 +184,24 @@ body{
     0 0 6px rgba(255,255,255,.18),
     0 0 18px rgba(255,255,255,.10);
 }
+
+/* ===== FICTION DISCLAIMER ===== */
+#fictionBlurb{
+  position: absolute;
+  left: 50%;
+  bottom: 3vh; /* ~10 viewport-height units from bottom */
+  transform: translateX(-50%);
+  max-width: min(90vw, 720px);
+
+  font-family: system-ui, sans-serif;
+  font-size: 11px;
+  line-height: 1.45;
+  text-align: center;
+  color: rgba(255,255,255,.45);
+
+  user-select: none;
+  pointer-events: none;
+}
 </style>
 </head>
 
@@ -211,6 +229,12 @@ body{
       </div>
     </div>
   </div>
+          <!-- FICTION DISCLAIMER -->
+        <div id="fictionBlurb">
+          <div>This work is a work of fiction.</div>
+          <div>All characters and events portrayed in this game are fictional.</div>
+          <div>Any resemblance to real persons, living or dead, or actual events is purely coincidental.</div>
+        </div>
 </div>
 
 <script>
