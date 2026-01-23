@@ -12,10 +12,8 @@
   --mega-pink: #E60C9A;
 }
 
-/* HTML background is red (under the modal) */
 html { background:#b3231f; }
 
-/* Body stays black, but we’ll place the modal over it */
 body{
   margin:0;
   height:100%;
@@ -25,20 +23,17 @@ body{
   overflow:hidden;
 }
 
-/* ===== FULLSCREEN MODAL ===== */
 #mfModal{
   position: fixed;
   inset: 0;
   z-index: 99999;
   display: grid;
   place-items: center;
-  background: #000;     /* modal itself is black */
+  background: #000;
   overflow: hidden;
   user-select: none;
-  /* no obvious close affordance */
 }
 
-/* Keep original stage sizing */
 .stage {
   width: min(92vw, 900px);
   aspect-ratio: 16 / 9;
@@ -55,7 +50,6 @@ body{
   transform-style: preserve-3d;
 }
 
-/* stable anchor */
 .logoWrap{
   position: relative;
   width: 100%;
@@ -63,7 +57,6 @@ body{
   transform-style: preserve-3d;
 }
 
-/* === LOGO CARD === */
 .stack {
   position:absolute;
   inset:0;
@@ -76,9 +69,26 @@ body{
   width:100%;
   height:100%;
   object-fit:contain;
+
+  animation-name: microDrift;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  will-change: transform;
 }
 
-/* === CAROUSEL RINGS === */
+/* lock logo_1 only */
+.layer.noDrift{
+  animation: none !important;
+  transform: none !important;
+  will-change: auto;
+}
+
+@keyframes microDrift{
+  0%   { transform: translate3d(0px,0px,0); }
+  50%  { transform: translate3d(var(--dx, 0px), var(--dy, 0px), 0); }
+  100% { transform: translate3d(0px,0px,0); }
+}
+
 .carousel {
   position:absolute;
   left:50%;
@@ -88,7 +98,6 @@ body{
 .carousel.ring1 { top: 44%; }
 .carousel.ring2 { top: 56%; }
 
-/* === GLYPHS === */
 .item{
   position:absolute;
   left:50%;
@@ -115,7 +124,6 @@ body{
   position:absolute;
 }
 
-/* ===== MEGAFUTURE: pink glow + black inner glyph ===== */
 .ring1 .item{
   color: var(--mega-pink);
   -webkit-text-stroke: 0;
@@ -153,7 +161,6 @@ body{
   pointer-events:none;
 }
 
-/* ===== 232: white hot irradiating ===== */
 .ring2 .item{
   color: #ffffff;
   -webkit-text-stroke: 0;
@@ -167,7 +174,6 @@ body{
     0 0 48px rgba(255,255,255,.18);
 }
 
-/* ===== LOADING TEXT ===== */
 #loader{
   position: absolute;
   left: 50%;
@@ -185,11 +191,10 @@ body{
     0 0 18px rgba(255,255,255,.10);
 }
 
-/* ===== FICTION DISCLAIMER ===== */
 #fictionBlurb{
   position: absolute;
   left: 50%;
-  bottom: 3vh; /* ~10 viewport-height units from bottom */
+  bottom: 3vh;
   transform: translateX(-50%);
   max-width: min(90vw, 720px);
 
@@ -207,37 +212,52 @@ body{
 
 <body>
 
-<!-- FULLSCREEN MODAL WRAP -->
 <div id="mfModal" aria-hidden="true">
   <div class="stage">
     <div class="space">
       <div class="logoWrap">
-        <!-- LOGO -->
         <div class="stack">
           <img class="layer" src="images/megafuture_logo_4.PNG" alt="">
           <img class="layer" src="images/megafuture_logo_3.PNG" alt="">
           <img class="layer" src="images/megafuture_logo_2.PNG" alt="">
-          <img class="layer" src="images/megafuture_logo_1.PNG" alt="">
+          <img class="layer noDrift" src="images/megafuture_logo_1.PNG" alt="">
         </div>
 
-        <!-- RINGS -->
         <div class="carousel ring1" id="ringMega"></div>
         <div class="carousel ring2" id="ring232"></div>
 
-        <!-- LOADER -->
         <div id="loader">loading.</div>
       </div>
     </div>
   </div>
-          <!-- FICTION DISCLAIMER -->
-        <div id="fictionBlurb">
-          <div>This work is a work of fiction.</div>
-          <div>All characters and events portrayed in this game are fictional.</div>
-          <div>Any resemblance to real persons, living or dead, or actual events is purely coincidental.</div>
-        </div>
+
+  <div id="fictionBlurb">
+    <div>This work is a work of fiction.</div>
+    <div>All characters and events portrayed in this game are fictional.</div>
+    <div>Any resemblance to real persons, living or dead, or actual events is purely coincidental.</div>
+  </div>
 </div>
 
 <script>
+/* ===== MICRO PARALLAX (4x faster)
+   IMPORTANT: do NOT apply to .noDrift (logo_1)
+*/
+(function initMicroParallax(){
+  const layers = document.querySelectorAll(".stack .layer:not(.noDrift)");
+  layers.forEach((img) => {
+    const dx = ((Math.random() * 3.2) - 1.6).toFixed(2); // +/-1.6px
+    const dy = ((Math.random() * 3.2) - 1.6).toFixed(2);
+
+    const dur = (1.5 + Math.random() * 1.0).toFixed(2);  // 1.5–2.5s
+    const delay = (-(Math.random() * parseFloat(dur))).toFixed(2);
+
+    img.style.setProperty("--dx", dx + "px");
+    img.style.setProperty("--dy", dy + "px");
+    img.style.animationDuration = dur + "s";
+    img.style.animationDelay = delay + "s";
+  });
+})();
+
 function buildGlyphRing(el, text, radius, opts={}){
   const { letterSpacingPx = 6, fontSizePx = 18 } = opts;
   el.innerHTML = "";
@@ -292,7 +312,7 @@ function updateGlyphRing(el, angleDeg){
   });
 }
 
-/* motion (unchanged speed) */
+/* motion (UNCHANGED: your stable base) */
 const FPS = 60;
 const moveFrames = 110;
 const pauseFrames = Math.round(2 * FPS);
@@ -309,7 +329,7 @@ const ring232  = document.getElementById("ring232");
 buildGlyphRing(ringMega, "MEGAFUTURE", 125, { letterSpacingPx: 9, fontSizePx: 18 });
 buildGlyphRing(ring232,  "232",        110, { letterSpacingPx: 10, fontSizePx: 18 });
 
-/* ===== start at perigee, wait 2s, then animate ===== */
+/* ===== start at perigee, wait 2s, then animate (UNCHANGED) ===== */
 const START_DELAY_MS = 2000;
 const startTime = performance.now();
 let frame = 0;
@@ -319,7 +339,6 @@ function tick(){
   const elapsed = performance.now() - startTime;
 
   if (elapsed < START_DELAY_MS){
-    // perigee hold (no rotation)
     updateGlyphRing(ringMega, 0);
     updateGlyphRing(ring232,  0);
     rafId = requestAnimationFrame(tick);
@@ -350,30 +369,15 @@ const loaderInterval = (() => {
 const modal = document.getElementById('mfModal');
 
 function closeModal(){
-  // stop loops
   if (rafId) cancelAnimationFrame(rafId);
   if (loaderInterval) clearInterval(loaderInterval);
-
-  // remove modal from DOM
   if (modal && modal.parentNode) modal.parentNode.removeChild(modal);
-
-  // restore scrolling etc if you want later (optional)
-  // document.body.style.overflow = '';
 }
 
-// prevent context menu + close on right click
 modal.addEventListener('contextmenu', (e) => {
   e.preventDefault();
   closeModal();
 }, { passive: false });
-
-// also close if you prefer mousedown right button (more “game-feel”)
-// modal.addEventListener('mousedown', (e) => {
-//   if (e.button === 2){
-//     e.preventDefault();
-//     closeModal();
-//   }
-// }, { passive: false });
 </script>
 
 </body>
