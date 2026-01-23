@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MegaFuture — Depth Carousel</title>
+
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&display=swap" rel="stylesheet">
+
+<style>
+:root{
+  --mega-pink: #E60C9A;
+}
+
+/* HTML background is red (under the modal) */
+html { background:#b3231f; }
+
+/* Body stays black, but we’ll place the modal over it */
+body{
+  margin:0;
+  height:100%;
+  background:#000;
+  display:grid;
+  place-items:center;
+  overflow:hidden;
+}
+
+/* ===== FULLSCREEN MODAL ===== */
+#mfModal{
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  display: grid;
+  place-items: center;
+  background: #000;     /* modal itself is black */
+  overflow: hidden;
+  user-select: none;
+  /* no obvious close affordance */
+}
+
+/* Keep original stage sizing */
+.stage {
+  width: min(92vw, 900px);
+  aspect-ratio: 16 / 9;
+  display:grid;
+  place-items:center;
+  perspective: 1200px;
+  position: relative;
+}
+
+.space {
+  position: relative;
+  width: min(90vw, 760px);
+  aspect-ratio: 16 / 9;
+  transform-style: preserve-3d;
+}
+
+/* stable anchor */
+.logoWrap{
+  position: relative;
+  width: 100%;
+  height: 100%;
+  transform-style: preserve-3d;
+}
+
+/* === LOGO CARD === */
+.stack {
+  position:absolute;
+  inset:0;
+  transform-style: preserve-3d;
+}
+
+.layer {
+  position:absolute;
+  inset:0;
+  width:100%;
+  height:100%;
+  object-fit:contain;
+}
+
+/* === CAROUSEL RINGS === */
+.carousel {
+  position:absolute;
+  left:50%;
+  top:50%;
+  transform-style: preserve-3d;
+}
+.carousel.ring1 { top: 44%; }
+.carousel.ring2 { top: 56%; }
+
+/* === GLYPHS === */
+.item{
+  position:absolute;
+  left:50%;
+  top:50%;
+  transform-style: preserve-3d;
+
+  font-family:
+    "Eurostile",
+    "Microgramma",
+    "Orbitron",
+    "Bank Gothic",
+    system-ui,
+    sans-serif;
+
+  font-weight: 700;
+  font-size: 18px;
+  letter-spacing: 0.06em;
+
+  user-select:none;
+  pointer-events:none;
+  white-space:pre;
+
+  display:inline-block;
+  position:absolute;
+}
+
+/* ===== MEGAFUTURE: pink glow + black inner glyph ===== */
+.ring1 .item{
+  color: var(--mega-pink);
+  -webkit-text-stroke: 0;
+  text-stroke: 0;
+
+  text-shadow:
+    0 0 2px  rgba(230,12,154,.95),
+    0 0 6px  rgba(230,12,154,.75),
+    0 0 12px rgba(230,12,154,.55),
+    0 0 24px rgba(230,12,154,.35),
+    0 0 48px rgba(230,12,154,.18);
+}
+
+.ring1 .item::before{
+  content: attr(data-ch);
+  position:absolute;
+  inset:0;
+  transform: scale(0.88);
+  transform-origin: center;
+  color: rgba(0,0,0,.92);
+  filter: blur(0.2px);
+  text-shadow: none;
+  pointer-events:none;
+}
+
+.ring1 .item::after{
+  content: attr(data-ch);
+  position:absolute;
+  inset:0;
+  transform: scale(0.93);
+  transform-origin: center;
+  color: rgba(0,0,0,.55);
+  filter: blur(0.6px);
+  text-shadow: none;
+  pointer-events:none;
+}
+
+/* ===== 232: white hot irradiating ===== */
+.ring2 .item{
+  color: #ffffff;
+  -webkit-text-stroke: 0;
+  text-stroke: 0;
+
+  text-shadow:
+    0 0 2px  rgba(255,255,255,.95),
+    0 0 6px  rgba(255,255,255,.75),
+    0 0 12px rgba(255,255,255,.55),
+    0 0 24px rgba(255,255,255,.35),
+    0 0 48px rgba(255,255,255,.18);
+}
+
+/* ===== LOADING TEXT ===== */
+#loader{
+  position: absolute;
+  left: 50%;
+  top: calc(80%);
+  transform: translateX(-50%);
+  font-family: "Orbitron", system-ui, sans-serif;
+  font-weight: 500;
+  font-size: 13px;
+  letter-spacing: 0.18em;
+  color: rgba(255,255,255,.9);
+  user-select: none;
+  pointer-events: none;
+  text-shadow:
+    0 0 6px rgba(255,255,255,.18),
+    0 0 18px rgba(255,255,255,.10);
+}
+</style>
+</head>
+
+<body>
+
+<!-- FULLSCREEN MODAL WRAP -->
+<div id="mfModal" aria-hidden="true">
+  <div class="stage">
+    <div class="space">
+      <div class="logoWrap">
+        <!-- LOGO -->
+        <div class="stack">
+          <img class="layer" src="./images/megafuture_logo_4.png" alt="">
+          <img class="layer" src="./images/megafuture_logo_3.png" alt="">
+          <img class="layer" src="./images/megafuture_logo_2.png" alt="">
+          <img class="layer" src="./images/megafuture_logo_1.png" alt="">
+        </div>
+
+        <!-- RINGS -->
+        <div class="carousel ring1" id="ringMega"></div>
+        <div class="carousel ring2" id="ring232"></div>
+
+        <!-- LOADER -->
+        <div id="loader">loading.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function buildGlyphRing(el, text, radius, opts={}){
+  const { letterSpacingPx = 6, fontSizePx = 18 } = opts;
+  el.innerHTML = "";
+
+  const glyphs = [];
+  for (const ch of text){
+    const d = document.createElement("div");
+    d.className = "item";
+    d.style.fontSize = fontSizePx + "px";
+    d.textContent = ch;
+    d.setAttribute("data-ch", ch);
+    el.appendChild(d);
+    glyphs.push(d);
+  }
+
+  const widths = glyphs.map(g => g.getBoundingClientRect().width);
+  const totalPx = widths.reduce((a,b)=>a+b,0) + letterSpacingPx*(glyphs.length-1);
+
+  let s = -totalPx/2;
+  for (let i=0;i<glyphs.length;i++){
+    const w = widths[i];
+    const centerS = s + w/2;
+    glyphs[i].dataset.theta0 = centerS / radius;
+    s += w + letterSpacingPx;
+  }
+
+  el.radius = radius;
+}
+
+function updateGlyphRing(el, angleDeg){
+  const r = el.radius;
+  const aRad = angleDeg * Math.PI / 180;
+
+  el.querySelectorAll(".item").forEach(g=>{
+    const theta0 = parseFloat(g.dataset.theta0) || 0;
+    const theta = theta0 + aRad;
+
+    const z = Math.cos(theta) * r;
+    const x = Math.sin(theta) * r;
+
+    const scale = (z + r) / (r * 2) + 0.5;
+    const opacity = Math.max(0.35, scale);
+
+    g.style.transform =
+      `translate(-50%, -50%)
+       translateX(${x}px)
+       translateZ(${z}px)
+       rotateY(${-theta * 180/Math.PI}deg)
+       scale(${scale})`;
+
+    g.style.opacity = opacity;
+  });
+}
+
+/* motion (unchanged speed) */
+const FPS = 60;
+const moveFrames = 110;
+const pauseFrames = Math.round(2 * FPS);
+const cycleFrames = moveFrames + pauseFrames;
+
+function angleForFrame(f){
+  const m = f % cycleFrames;
+  return m < moveFrames ? (m / moveFrames) * 360 : 360;
+}
+
+const ringMega = document.getElementById("ringMega");
+const ring232  = document.getElementById("ring232");
+
+buildGlyphRing(ringMega, "MEGAFUTURE", 125, { letterSpacingPx: 9, fontSizePx: 18 });
+buildGlyphRing(ring232,  "232",        110, { letterSpacingPx: 10, fontSizePx: 18 });
+
+/* ===== start at perigee, wait 2s, then animate ===== */
+const START_DELAY_MS = 2000;
+const startTime = performance.now();
+let frame = 0;
+let rafId = 0;
+
+function tick(){
+  const elapsed = performance.now() - startTime;
+
+  if (elapsed < START_DELAY_MS){
+    // perigee hold (no rotation)
+    updateGlyphRing(ringMega, 0);
+    updateGlyphRing(ring232,  0);
+    rafId = requestAnimationFrame(tick);
+    return;
+  }
+
+  frame++;
+  const a = angleForFrame(frame);
+  updateGlyphRing(ringMega, -a);
+  updateGlyphRing(ring232,  +a);
+  rafId = requestAnimationFrame(tick);
+}
+tick();
+
+/* ===== LOADING CYCLER (forever until closed) ===== */
+const loaderInterval = (() => {
+  const el = document.getElementById("loader");
+  if (!el) return null;
+
+  let dots = 1;
+  return setInterval(() => {
+    dots = (dots % 3) + 1;
+    el.textContent = "loading" + ".".repeat(dots);
+  }, 420);
+})();
+
+/* ===== RIGHT MOUSE CLOSES + REMOVE FROM DOM ===== */
+const modal = document.getElementById('mfModal');
+
+function closeModal(){
+  // stop loops
+  if (rafId) cancelAnimationFrame(rafId);
+  if (loaderInterval) clearInterval(loaderInterval);
+
+  // remove modal from DOM
+  if (modal && modal.parentNode) modal.parentNode.removeChild(modal);
+
+  // restore scrolling etc if you want later (optional)
+  // document.body.style.overflow = '';
+}
+
+// prevent context menu + close on right click
+modal.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  closeModal();
+}, { passive: false });
+
+// also close if you prefer mousedown right button (more “game-feel”)
+// modal.addEventListener('mousedown', (e) => {
+//   if (e.button === 2){
+//     e.preventDefault();
+//     closeModal();
+//   }
+// }, { passive: false });
+</script>
+
+</body>
+</html>

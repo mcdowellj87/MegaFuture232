@@ -1,0 +1,631 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MegaFuture — Paint Lightbox (Toon + Phong Mids) — FBX</title>
+<style>
+  html, body { margin:0; height:100%; background:#000; overflow:hidden; }
+  #c { display:block; width:100vw; height:100vh; }
+
+  #ui{
+    position: fixed;
+    left: 12px;
+    top: 12px;
+    display: grid;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: rgba(0,0,0,.55);
+    backdrop-filter: blur(6px);
+    border: 1px solid rgba(255,255,255,.10);
+    color: #d8d8e0;
+    font: 13px/1.3 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    user-select: none;
+    width: min(420px, calc(100vw - 24px));
+  }
+  #ui .row { display:flex; gap:10px; align-items:center; }
+  #ui label { opacity:.75; width: 128px; }
+  #ui select, #ui input[type="color"], #ui input[type="text"], #ui input[type="range"]{
+    flex: 1;
+    background: rgba(255,255,255,.06);
+    border: 1px solid rgba(255,255,255,.14);
+    color: #e8e8ef;
+    border-radius: 10px;
+    padding: 6px 8px;
+    font: inherit;
+    outline: none;
+  }
+  #ui input[type="checkbox"] { transform: translateY(1px); }
+  #ui .hint { opacity:.6; font: 12px/1.35 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  .val { width: 52px; text-align: right; opacity:.8; }
+</style>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three.module.js"
+  }
+}
+</script>
+</head>
+
+<body>
+<div id="ui">
+  <div class="row">
+    <label>Model</label>
+    <select id="modelSel"></select>
+  </div>
+
+  <div class="row">
+    <label>Base skin</label>
+    <input id="baseColor" type="color" value="#ffc478" />
+  </div>
+
+  <div class="row">
+    <label>Use mask</label>
+    <div style="flex:1; display:flex; align-items:center; gap:10px;">
+      <input id="useMask" type="checkbox" checked />
+      <span style="opacity:.7;">Mask gates spec/mids</span>
+    </div>
+  </div>
+
+  <div class="row">
+    <label>Mask texture</label>
+    <input id="maskPath" type="text" value="../assets/mezza_mask.png" />
+  </div>
+
+  <div class="row">
+    <label>Sun power</label>
+    <input id="sunPower" type="range" min="0" max="2.5" step="0.01" value="1.00" />
+    <div class="val" id="sunPowerVal">1.00</div>
+  </div>
+
+  <div class="row">
+    <label>Exposure</label>
+    <input id="exposure" type="range" min="0.6" max="2.0" step="0.01" value="2.00" />
+    <div class="val" id="exposureVal">2.00</div>
+  </div>
+
+  <div class="hint">
+    Drag to orbit • Wheel zoom • Shift+Drag pans<br>
+    Auto-fits model to stay <b>inside the lightbox</b>.<br>
+    Rim light follows the <b>camera/view direction</b> for consistent outline sheen.<br>
+    Sun is also tied to the camera (front-lit stylized mode).
+  </div>
+</div>
+
+<canvas id="c"></canvas>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from '../vendor/GLTFLoader.js';
+import { FBXLoader } from '../vendor/FBXLoader.js';
+
+/* =========================================================
+   SETTINGS
+========================================================= */
+const BOX_SIZE_M = 3.0;
+const FLOOR_Y = -BOX_SIZE_M * 0.5;
+const BG = 0x0a0a10;
+
+// How much of the box the character should occupy (largest dimension)
+const FIT_FRACTION = 0.60; // 60% of box size feels "inside" + roomy
+
+// Make GLB entries match FBX "feel" (knock them down after fit)
+const GLB_FIT_MUL = 0.10; // start here; tweak if needed
+
+/* =========================================================
+   ASSETS
+========================================================= */
+const MODELS = [
+  { name: 'Mezza — idle (FBX)',    url: '../assets/mezza_idle.fbx',    type: 'fbx',  fitMul: 1.0 },
+  { name: 'Mezza — walking (FBX)', url: '../assets/mezza_walking.fbx', type: 'fbx',  fitMul: 1.0 },
+  { name: 'Mezza — running (FBX)', url: '../assets/mezza_running.fbx', type: 'fbx',  fitMul: 1.0 },
+
+  { name: 'Mezza — In Color (GLB)', url: '../assets/MezzaWithColor.glb', type: 'gltf', fitMul: GLB_FIT_MUL },
+  { name: 'Mezza — walking (GLB)',  url: '../assets/mezza_walking.glb',  type: 'gltf', fitMul: GLB_FIT_MUL },
+  { name: 'Mezza — running (GLB)',  url: '../assets/mezza_running.glb',  type: 'gltf', fitMul: GLB_FIT_MUL },
+  { name: 'Amadeus (GLB)',          url: '../assets/amadeus.glb',        type: 'gltf', fitMul: GLB_FIT_MUL },
+];
+
+/* =========================================================
+   THREE BASICS
+========================================================= */
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true, powerPreference:'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.75));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 2.00;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(BG);
+
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.01, 200);
+camera.position.set(0, 0.35, 2.6);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* =========================================================
+   LIGHTBOX ROOM
+========================================================= */
+const room = new THREE.Group();
+scene.add(room);
+
+{
+  const boxGeo = new THREE.BoxGeometry(BOX_SIZE_M, BOX_SIZE_M, BOX_SIZE_M);
+  const edges = new THREE.EdgesGeometry(boxGeo);
+  const line = new THREE.LineSegments(
+    edges,
+    new THREE.LineBasicMaterial({ color: 0x2f2f3c, transparent:true, opacity: 0.85 })
+  );
+  room.add(line);
+}
+
+{
+  const geo = new THREE.PlaneGeometry(BOX_SIZE_M, BOX_SIZE_M, 1, 1);
+  geo.rotateX(-Math.PI/2);
+  const mat = new THREE.MeshStandardMaterial({ color: 0x12121a, roughness: 1.0, metalness: 0.0 });
+  const m = new THREE.Mesh(geo, mat);
+  m.position.y = FLOOR_Y;
+  room.add(m);
+}
+
+/* =========================================================
+   LIGHTS
+========================================================= */
+// Lower ambient so forms are shaped more by sun + rim (but still not black-crush)
+scene.add(new THREE.AmbientLight(0xffffff, 0.08));
+
+// “Sun” (key) — will be tied to camera in the loop
+const key = new THREE.DirectionalLight(0xffffff, 1.0);
+scene.add(key);
+
+// Rim that follows the camera (directional light always points from camera toward the subject)
+const rim = new THREE.DirectionalLight(0x9bb7ff, 0.55);
+scene.add(rim);
+
+// Helper temp vector
+const _camPosWorld = new THREE.Vector3();
+
+/* =========================================================
+   TINY ORBIT CONTROLS (inline)
+========================================================= */
+const orbit = {
+  target: new THREE.Vector3(0, 0.0, 0),
+  radius: camera.position.distanceTo(new THREE.Vector3(0,0,0)),
+  theta: 0,
+  phi: 0.15,
+  dragging: false,
+  panning: false,
+  lastX: 0,
+  lastY: 0,
+  panOffset: new THREE.Vector3(),
+};
+
+function updateOrbitCam(){
+  orbit.phi = THREE.MathUtils.clamp(orbit.phi, -1.2, 1.2);
+
+  const r = orbit.radius;
+  const ct = Math.cos(orbit.theta), st = Math.sin(orbit.theta);
+  const cp = Math.cos(orbit.phi),   sp = Math.sin(orbit.phi);
+
+  const x = st * cp * r;
+  const y = sp * r;
+  const z = ct * cp * r;
+
+  camera.position.copy(orbit.target).add(orbit.panOffset).add(new THREE.Vector3(x, y, z));
+  camera.lookAt(orbit.target.clone().add(orbit.panOffset));
+}
+updateOrbitCam();
+
+canvas.addEventListener('pointerdown', (e) => {
+  canvas.setPointerCapture(e.pointerId);
+  orbit.dragging = true;
+  orbit.panning = e.shiftKey;
+  orbit.lastX = e.clientX;
+  orbit.lastY = e.clientY;
+});
+
+canvas.addEventListener('pointermove', (e) => {
+  if (!orbit.dragging) return;
+  const dx = e.clientX - orbit.lastX;
+  const dy = e.clientY - orbit.lastY;
+  orbit.lastX = e.clientX;
+  orbit.lastY = e.clientY;
+
+  if (orbit.panning){
+    const panSpeed = 0.0025 * orbit.radius;
+    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0).normalize();
+    const up    = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 1).normalize();
+    orbit.panOffset.addScaledVector(right, -dx * panSpeed);
+    orbit.panOffset.addScaledVector(up,    dy * panSpeed);
+  } else {
+    orbit.theta -= dx * 0.006;
+    orbit.phi   -= dy * 0.006;
+  }
+  updateOrbitCam();
+});
+
+canvas.addEventListener('pointerup', () => { orbit.dragging = false; });
+
+addEventListener('wheel', (e) => {
+  const z = Math.exp(e.deltaY * 0.0012);
+  orbit.radius = THREE.MathUtils.clamp(orbit.radius * z, 0.55, 12.0);
+  updateOrbitCam();
+}, { passive: true });
+
+/* =========================================================
+   TOON RAMP
+========================================================= */
+function makeToonRamp(){
+  const c = document.createElement('canvas');
+  c.width = 256; c.height = 1;
+  const g = c.getContext('2d');
+
+  const stops = ['#14141c','#2a2a38','#4a4a60','#7e7ea3','#ffffff'];
+  const w = 256 / stops.length;
+  for (let i=0;i<stops.length;i++){
+    g.fillStyle = stops[i];
+    g.fillRect(i*w, 0, w, 1);
+  }
+
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.minFilter = t.magFilter = THREE.NearestFilter;
+  t.generateMipmaps = false;
+  return t;
+}
+const TOON_RAMP = makeToonRamp();
+
+/* =========================================================
+   MATERIAL: flat base + toon + Phong-like spec mids/highs (maskable)
+========================================================= */
+const texLoader = new THREE.TextureLoader();
+
+function makeToonPhongMaterial({ baseColor, maskTex=null, useMask=true }){
+  const mat = new THREE.MeshToonMaterial({
+    color: new THREE.Color(baseColor),
+    gradientMap: TOON_RAMP
+  });
+
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uBaseColor   = { value: new THREE.Color(baseColor) };
+    shader.uniforms.uUseMask     = { value: useMask ? 1.0 : 0.0 };
+    shader.uniforms.uMaskTex     = { value: maskTex };
+    shader.uniforms.uBaseBright  = { value: 1.15 };
+
+    shader.uniforms.uMidSpecPow  = { value: 18.0 };
+    shader.uniforms.uHiSpecPow   = { value: 85.0 };
+    shader.uniforms.uMidSpecAmt  = { value: 0.55 };
+    shader.uniforms.uHiSpecAmt   = { value: 1.25 };
+    shader.uniforms.uSpecBands   = { value: 3.0 };
+
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <common>',
+      `#include <common>
+       uniform vec3 uBaseColor;
+       uniform float uUseMask;
+       uniform sampler2D uMaskTex;
+       uniform float uBaseBright;
+
+       uniform float uMidSpecPow;
+       uniform float uHiSpecPow;
+       uniform float uMidSpecAmt;
+       uniform float uHiSpecAmt;
+       uniform float uSpecBands;
+      `
+    );
+
+    shader.fragmentShader = shader.fragmentShader.replace(
+      'vec4 diffuseColor = vec4( diffuse, opacity );',
+      'vec4 diffuseColor = vec4( uBaseColor, opacity );'
+    );
+
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <output_fragment>',
+      `
+      vec3 outColor = outgoingLight;
+      outColor *= uBaseBright;
+
+      float m = 1.0;
+      #ifdef USE_UV
+        if (uUseMask > 0.5) {
+          m = texture2D(uMaskTex, vUv).r;
+        }
+      #endif
+
+      vec3 N = normalize( normal );
+      vec3 V = normalize( -vViewPosition );
+      vec3 L = normalize(vec3(0.55, 0.35, 0.75));
+      vec3 H = normalize(L + V);
+      float ndh = max(dot(N, H), 0.0);
+
+      float midSpec = pow(ndh, uMidSpecPow) * uMidSpecAmt;
+      float hiSpec  = pow(ndh, uHiSpecPow)  * uHiSpecAmt;
+      float spec = (midSpec + hiSpec);
+
+      spec = clamp(spec, 0.0, 1.0);
+      float bands = max(uSpecBands, 1.0);
+      spec = floor(spec * bands) / bands;
+
+      float ndl = max(dot(N, L), 0.0);
+      spec *= smoothstep(0.05, 0.4, ndl);
+
+      spec *= m;
+      outColor += vec3(spec);
+
+      gl_FragColor = vec4( outColor, diffuseColor.a );
+
+      #ifdef TONE_MAPPING
+        gl_FragColor.rgb = toneMapping( gl_FragColor.rgb );
+      #endif
+      gl_FragColor = linearToOutputTexel( gl_FragColor );
+      `
+    );
+
+    mat.userData._shader = shader;
+  };
+
+  return mat;
+}
+
+function updateMaterialUniforms(root, { baseColor, maskTex, useMask }){
+  root.traverse((o) => {
+    if (!o.isMesh) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+
+    for (const m of mats){
+      const sh = m?.userData?._shader;
+      if (!sh) continue;
+      if (sh.uniforms.uBaseColor) sh.uniforms.uBaseColor.value.set(baseColor);
+      if (sh.uniforms.uUseMask)   sh.uniforms.uUseMask.value = useMask ? 1.0 : 0.0;
+      if (maskTex && sh.uniforms.uMaskTex) sh.uniforms.uMaskTex.value = maskTex;
+    }
+  });
+}
+
+/* =========================================================
+   MODEL LOADING / SWAPPING
+========================================================= */
+const gltfLoader = new GLTFLoader();
+const fbxLoader  = new FBXLoader();
+
+let currentRoot = null;
+let currentMixer = null;
+let clock = new THREE.Clock();
+
+async function loadModel(entry){
+  if (entry.type === 'fbx'){
+    const obj = await fbxLoader.loadAsync(entry.url);
+    return { scene: obj, animations: obj.animations || [] };
+  }
+  return await gltfLoader.loadAsync(entry.url);
+}
+
+function clearCurrent(){
+  if (currentRoot){
+    scene.remove(currentRoot);
+    currentRoot.traverse((o) => {
+      if (o.isMesh){
+        o.geometry?.dispose?.();
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        for (const m of mats) m?.dispose?.();
+      }
+    });
+  }
+  currentRoot = null;
+  currentMixer = null;
+}
+
+// Fit to box, then optionally multiply (used to knock GLBs down)
+function fitModelToLightbox(root, fitMul = 1.0){
+  root.position.set(0,0,0);
+  root.rotation.set(0,0,0);
+  root.updateWorldMatrix(true, true);
+
+  const box = new THREE.Box3().setFromObject(root);
+  const size = new THREE.Vector3();
+  box.getSize(size);
+
+  const maxDim = Math.max(size.x, size.y, size.z);
+  if (!isFinite(maxDim) || maxDim <= 0) return;
+
+  const desired = BOX_SIZE_M * FIT_FRACTION;
+  const s = (desired / maxDim) * fitMul;
+
+  root.scale.setScalar(s);
+  root.updateWorldMatrix(true, true);
+}
+
+function centerAndFloor(root){
+  root.updateWorldMatrix(true, true);
+
+  const box = new THREE.Box3().setFromObject(root);
+  const center = new THREE.Vector3();
+  box.getCenter(center);
+  root.position.sub(center);
+
+  root.updateWorldMatrix(true, true);
+
+  const box2 = new THREE.Box3().setFromObject(root);
+  const dy = (FLOOR_Y - box2.min.y) + 0.002;
+  root.position.y += dy;
+
+  root.updateWorldMatrix(true, true);
+}
+
+function applyMaterials(root, { baseColor, maskTex, useMask, isFBX }){
+  root.traverse((o) => {
+    if (!o.isMesh) return;
+
+    // Safer FBX normal/tangent handling (prevents computeTangents warnings)
+    if (isFBX && o.geometry){
+      const g = o.geometry;
+      g.computeVertexNormals?.();
+
+      const hasIndex  = !!g.index;
+      const hasUV     = !!g.attributes?.uv;
+      const hasNormal = !!g.attributes?.normal;
+
+      if (hasIndex && hasUV && hasNormal && g.computeTangents){
+        try { g.computeTangents(); } catch (_) {}
+      }
+    }
+
+    if (o.isSkinnedMesh){
+      o.frustumCulled = false;
+      o.normalizeSkinWeights?.();
+    }
+
+    const mat = makeToonPhongMaterial({ baseColor, maskTex, useMask });
+    if (o.isSkinnedMesh) mat.skinning = true;
+    mat.needsUpdate = true;
+    o.material = mat;
+  });
+}
+
+async function setModelByIndex(i){
+  const entry = MODELS[i];
+  if (!entry) return;
+
+  clearCurrent();
+
+  const baseColor = document.getElementById('baseColor').value;
+  const useMask   = document.getElementById('useMask').checked;
+  const maskPath  = document.getElementById('maskPath').value.trim();
+
+  let maskTex = null;
+  if (maskPath){
+    maskTex = await new Promise((resolve) => {
+      texLoader.load(
+        maskPath,
+        (t) => {
+          t.colorSpace = THREE.SRGBColorSpace;
+          t.flipY = false;
+          t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+          resolve(t);
+        },
+        undefined,
+        () => resolve(null)
+      );
+    });
+  }
+
+  const loaded = await loadModel(entry);
+  const root = loaded.scene || loaded.scenes?.[0];
+  currentRoot = root;
+
+  // FBX fitMul=1.0, GLB fitMul=0.10 (or whatever you set)
+  fitModelToLightbox(root, entry.fitMul ?? 1.0);
+
+  applyMaterials(root, { baseColor, maskTex, useMask, isFBX: entry.type === 'fbx' });
+  centerAndFloor(root);
+
+  const anims = loaded.animations || [];
+  if (anims.length){
+    currentMixer = new THREE.AnimationMixer(root);
+    currentMixer.clipAction(anims[0]).play();
+  }
+
+  scene.add(root);
+
+  orbit.panOffset.set(0,0,0);
+  orbit.target.set(0, 0.1, 0);
+  updateOrbitCam();
+}
+
+/* =========================================================
+   UI
+========================================================= */
+const modelSel = document.getElementById('modelSel');
+for (let i=0; i<MODELS.length; i++){
+  const opt = document.createElement('option');
+  opt.value = String(i);
+  opt.textContent = MODELS[i].name;
+  modelSel.appendChild(opt);
+}
+modelSel.addEventListener('change', () => setModelByIndex(+modelSel.value));
+
+const sunPower = document.getElementById('sunPower');
+const sunPowerVal = document.getElementById('sunPowerVal');
+sunPower.addEventListener('input', () => {
+  sunPowerVal.textContent = (+sunPower.value).toFixed(2);
+  key.intensity = +sunPower.value;
+});
+sunPowerVal.textContent = (+sunPower.value).toFixed(2);
+
+const exposure = document.getElementById('exposure');
+const exposureVal = document.getElementById('exposureVal');
+exposure.addEventListener('input', () => {
+  exposureVal.textContent = (+exposure.value).toFixed(2);
+  renderer.toneMappingExposure = +exposure.value;
+});
+exposureVal.textContent = (+exposure.value).toFixed(2);
+
+document.getElementById('baseColor').addEventListener('input', () => {
+  if (!currentRoot) return;
+  updateMaterialUniforms(currentRoot, {
+    baseColor: document.getElementById('baseColor').value,
+    useMask: document.getElementById('useMask').checked,
+    maskTex: null
+  });
+});
+
+document.getElementById('useMask').addEventListener('change', () => {
+  if (!currentRoot) return;
+  updateMaterialUniforms(currentRoot, {
+    baseColor: document.getElementById('baseColor').value,
+    useMask: document.getElementById('useMask').checked,
+    maskTex: null
+  });
+});
+
+document.getElementById('maskPath').addEventListener('change', async () => {
+  await setModelByIndex(+modelSel.value);
+});
+
+/* =========================================================
+   START
+========================================================= */
+await setModelByIndex(0);
+
+/* =========================================================
+   LOOP
+========================================================= */
+function updateLightsToFollowCamera(){
+  // DirectionalLight shines from its position toward its target.
+  // Put BOTH rim + key at the camera and aim them at the orbit target.
+  const target = orbit.target.clone().add(orbit.panOffset);
+
+  camera.getWorldPosition(_camPosWorld);
+
+  // Rim follows camera
+  rim.position.copy(_camPosWorld);
+  rim.target.position.copy(target);
+  rim.target.updateWorldMatrix(true, false);
+
+  // Key/sun follows camera (front-lit stylized mode)
+  key.position.copy(_camPosWorld);
+  key.target.position.copy(target);
+  key.target.updateWorldMatrix(true, false);
+}
+
+function animate(){
+  const dt = Math.min(clock.getDelta(), 0.033);
+  if (currentMixer) currentMixer.update(dt);
+
+  updateLightsToFollowCamera();
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+}
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>

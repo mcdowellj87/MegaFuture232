@@ -2,5 +2,9 @@
 /assets/
 /assets/**
 
+# macOS filesystem junk
+.DS_Store
+**/.DS_Store
+
 # (Optional) If you keep a placeholder file so the folder exists:
 !/assets/.gitkeep
