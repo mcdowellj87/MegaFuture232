@@ -195,7 +195,7 @@
   letter-spacing: 0.18em;
   color: rgba(255,255,255,.9);
   user-select: none;
-  pointer-events: none;
+  pointer-events: auto;
   text-shadow:
     0 0 6px rgba(255,255,255,.18),
     0 0 18px rgba(255,255,255,.10);
@@ -237,7 +237,7 @@
   </div>
   <div class="help">Tab to close • Enter to run</div>
 </div>
-<div id="mfModal" aria-hidden="true">
+<div id="mfModal" aria-hidden="false">
   <div class="stage">
     <div class="space">
       <div class="logoWrap">
@@ -264,6 +264,10 @@
 </div>
 <script>
 (() => {
+  // show title screen immediately
+  const modal = document.getElementById("mfModal");
+  if (modal) modal.style.display = "grid";
+
   /* ===== MICRO PARALLAX (4x faster) ===== */
   const layers = document.querySelectorAll("#mfModal .stack .layer:not(.noDrift)");
   layers.forEach((img) => {
@@ -380,18 +384,85 @@
     loaderEl.textContent = "loading" + ".".repeat(dots);
   }, 420) : 0;
 
-  /* right mouse closes + remove from DOM */
-  const modal = document.getElementById("mfModal");
-  function closeModal(){
-    if (rafId) cancelAnimationFrame(rafId);
-    if (loaderInterval) clearInterval(loaderInterval);
-    if (modal && modal.parentNode) modal.parentNode.removeChild(modal);
+/* =========================
+   WAIT FOR WORLD TO BE READY
+========================= */
+
+function setModalReadyToStart(){
+  if (loaderInterval) clearInterval(loaderInterval);
+
+  if (loaderEl){
+    loaderEl.textContent = "press any key to start";
+    loaderEl.style.cursor = "default";
+    loaderEl.style.opacity = "1";
   }
 
-  modal.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
+  let started = false;
+
+  const cleanup = () => {
+    window.removeEventListener('keydown', onKeyDown, true);
+    modal.removeEventListener('pointerdown', onPointerDown, true);
+    window.removeEventListener('contextmenu', blockCtxMenu, true);
+  };
+
+  const start = (e) => {
+    if (started) return;
+    started = true;
+
+    if (e?.cancelable) e.preventDefault();
+    e?.stopPropagation?.();
+
+    // enable pointer lock gate + request lock (user gesture)
+    if (window.__mfEnablePointerLock) window.__mfEnablePointerLock();
+    const c = document.getElementById('c');
+    if (c && !document.pointerLockElement) c.requestPointerLock();
+
+    cleanup();
     closeModal();
-  }, { passive: false });
+  };
+
+  const onKeyDown = (e) => {
+    if (e.code === 'Tab') return;    // preserve your hidden console toggle
+    if (e.code === 'Escape') return; // don't start on Escape
+    start(e);
+  };
+
+  const onPointerDown = (e) => {
+    // ✅ catches left/middle/right click
+    // ✅ prevents context menu because it runs before contextmenu
+    if (e.cancelable) e.preventDefault();
+    e.stopPropagation();
+    start(e);
+  };
+
+  window.addEventListener('keydown', onKeyDown, true);
+  modal.addEventListener('pointerdown', onPointerDown, true);
+
+  // ✅ global contextmenu block while modal exists
+  window.addEventListener('contextmenu', blockCtxMenu, true);
+}
+
+/* listen for the world-ready signal */
+window.addEventListener('mf:world-ready', () => {
+  setModalReadyToStart();
+}, { once: true });
+
+function blockCtxMenu(e){
+  if (!modal || !modal.isConnected) return;
+  e.preventDefault();
+  e.stopPropagation();
+}
+
+function closeModal(){
+  if (rafId) cancelAnimationFrame(rafId);
+  if (loaderInterval) clearInterval(loaderInterval);
+
+  // ✅ remove the global blocker once modal is gone
+  window.removeEventListener("contextmenu", blockCtxMenu, true);
+
+  if (modal && modal.parentNode) modal.parentNode.removeChild(modal);
+}
+
 })();
 </script>
 <canvas id="c"></canvas>
@@ -651,7 +722,14 @@ addEventListener('resize', () => {
 /* =========================
    POINTER LOCK + MOUSE LOOK
 ========================= */
+let CAN_LOCK = false;
+// called by the title-screen script when the world is fully loaded
+window.__mfEnablePointerLock = () => {
+  CAN_LOCK = true;
+};
+
 function lockPointer(){
+  if (!CAN_LOCK) return;
   if (!document.pointerLockElement) canvas.requestPointerLock();
 }
 canvas.addEventListener('click', lockPointer);
@@ -666,19 +744,6 @@ document.addEventListener('mousemove', (e) => {
   pitch -= e.movementY * MOUSE_SENS;
   pitch = THREE.MathUtils.clamp(pitch, PITCH_MIN, PITCH_MAX);
 });
-
-/* Mousewheel zoom (third-person only) */
-addEventListener('wheel', (e) => {
-  if (VIEW_MODE !== 'third') return;
-
-  THIRD_CAM_BACK = THREE.MathUtils.clamp(
-    THIRD_CAM_BACK + e.deltaY * THIRD_CAM_ZOOM_SPEED,
-    THIRD_CAM_BACK_MIN,
-    THIRD_CAM_BACK_MAX
-  );
-
-  e.preventDefault();
-}, { passive: false });
 
 /* =========================
    LIGHTS
@@ -763,6 +828,10 @@ addEventListener('keydown', e => {
   if (e.code === 'Space') jumpBufferT = JUMP_BUFFER;
 });
 addEventListener('keyup', e => keys.delete(e.code));
+
+window.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+}, { capture: true });
 
 /* =========================
    HIDDEN DEV CONSOLE (Tab)
@@ -2077,8 +2146,15 @@ async function loadLevel(){
   jumpBufferT = 0;
 }
 
-await loadLevel();
-await loadMezza(); // if it fails, fallback prisms are used
+try {
+  await loadLevel();
+  await loadMezza(); // if it fails, fallback prisms are used
+} catch (err) {
+  console.error('[init] world init failed:', err);
+  // still allow user to start so you can debug in-world
+} finally {
+  window.dispatchEvent(new Event('mf:world-ready'));
+}
 
 /* =========================
    MOVEMENT / PHYSICS STEP
