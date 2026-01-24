@@ -46,7 +46,10 @@
   z-index: 99999;
   display: grid;
   place-items: center;
-  background: #000;
+
+  /* 50% translucent overlay */
+  background: rgba(0,0,0,.5);
+
   overflow: hidden;
   user-select: none;
 }
@@ -564,7 +567,7 @@ const THIRD_COLLIDE_PADDING = 0.22;
    MOUSE LOOK (pointer lock)
 ========================= */
 let isLocked = false;
-let yaw = 0;    // radians
+let yaw = -THREE.MathUtils.degToRad(30); // 30° clockwise (turn right)
 let pitch = 0;  // radians
 const MOUSE_SENS = 0.0022;
 const PITCH_MIN = THREE.MathUtils.degToRad(-80);
