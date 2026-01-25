@@ -44,11 +44,35 @@
       background:#000;
     }
 
+    /* ===== Full background behind actors (no crop) ===== */
+    .bgLayer{
+      position:absolute;
+      inset:0;
+      pointer-events:none;
+      z-index: 1;
+      background: url("images/blood_bay.png") center center no-repeat;
+      background-size: contain;
+
+      opacity: 0;
+      transform: scale(1);
+      transition:
+        opacity 2800ms ease,
+        transform 0ms linear; /* JS will set timing when shrink begins */
+      will-change: transform, opacity;
+      transform-origin: center center;
+    }
+    .bgLayer.isVisible{ opacity: 1; }
+
     .charLayer{
       position:absolute;
       inset:0;
       pointer-events:none;
+      z-index: 2;
+
+      opacity: 0;
+      transition: opacity 1400ms ease;
     }
+    .charLayer.isVisible{ opacity: 1; }
 
     .captionBar{
       position:absolute;
@@ -63,6 +87,7 @@
       box-sizing:border-box;
       background: linear-gradient(to top, rgba(0,0,0,.92), rgba(0,0,0,.10) 70%, rgba(0,0,0,0));
       pointer-events:none;
+      z-index: 3;
     }
 
     .captionPanel{
@@ -94,7 +119,7 @@
       transition: opacity 260ms ease;
     }
 
-    /* Cards: now auto-sized to the image itself, no cropping, no border, no opaque bg */
+    /* Cards: auto-sized to image, no cropping */
     .card{
       position:absolute;
       top: 10%;
@@ -121,22 +146,6 @@
       background: transparent;
     }
 
-    /* Fallback blocks only if image missing */
-    .fallback{
-      width: clamp(200px, 28vw, 360px);
-      height: clamp(320px, 55vh, 520px);
-      border-radius: 18px;
-      display:grid;
-      place-items:center;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-      font-size: 12px;
-      letter-spacing: .08em;
-      text-transform: uppercase;
-      opacity: .95;
-    }
-    .fallback.red{ background:#ff2b2b; color:#2b0000; }
-    .fallback.blue{ background:#2b55ff; color:#000a2b; }
-
     #debug{
       position:fixed;
       left:12px;
@@ -150,7 +159,7 @@
       white-space:pre;
       user-select:none;
       pointer-events:none;
-      display:none; /* set to block if needed */
+      display:none;
     }
   </style>
 </head>
@@ -160,15 +169,11 @@
 
   <div id="mfModal">
     <div class="stage" id="stage">
+      <div class="bgLayer" id="bgLayer" aria-hidden="true"></div>
 
       <div class="charLayer" id="charLayer">
-        <div class="card" id="amadeusCard" aria-hidden="true">
-          <div class="fallback red">AMADEUS</div>
-        </div>
-
-        <div class="card" id="aristocratCard" aria-hidden="true">
-          <div class="fallback blue">ARISTOCRAT</div>
-        </div>
+        <div class="card" id="amadeusCard" aria-hidden="true"></div>
+        <div class="card" id="aristocratCard" aria-hidden="true"></div>
       </div>
 
       <div class="captionBar">
@@ -176,34 +181,37 @@
           <div id="captionText"></div>
         </div>
       </div>
-
     </div>
   </div>
 
   <script>
   (() => {
-    const AMADEUS_IMG   = "images/amadeus.png";
-    const ARISTOCRAT_IMG= "images/aristocrat.png";
+    const AMADEUS_IMG    = "images/amadeus.png";
+    const ARISTOCRAT_IMG = "images/aristocrat.png";
 
-    // Phase 1: swap
+    // Fade cues (match your exact line)
+    const BG_FADE_ON_TEXT = "It is a time when the sun burns weak and red.";
+    const ACTORS_FADE_ON_EXACT = "These \"men,\" as they once fashioned themselves.";
+
+    // Motion timing (same as your previous)
     const MOVE_MS = 24000;
-
-    // Phase 2: red returns to center after blue deletes
     const SOLO_SLIDE_MS = 8000;
 
-    // Phase 3: zoom after red reaches center until story ends
     const ZOOM_FROM = 1.00;
     const ZOOM_TO   = 1.22;
     const ZOOM_EASE = "linear";
 
-    // Motion feel: mostly constant speed, gentle ease at start/end
-    // (flat middle, acceleration only near ends)
+    // Background shrink should match Amadeus zoom timing
+    const BG_SCALE_FROM = 1.00;
+    // choose a pleasing inverse (not literal inverse math)
+    const BG_SCALE_TO   = 0.88;
+
     const MOVE_EASE = "cubic-bezier(0.10, 0.00, 0.90, 1.00)";
     const SOLO_EASE = "cubic-bezier(0.10, 0.00, 0.90, 1.00)";
 
-    // Story trigger
     const DELETE_BLUE_ON_TEXT = "In their infighting, only one remained.";
-    const EXTRA_HOLD_BEFORE_DELETE_MS = 0;
+    const EXTRA_HOLD_BEFORE_DELETE_MS = 5000;
+    const DELAY_BEFORE_RED_RECENTER_MS = 2000;
 
     const storyCues = [
       { text: "It is a time when the sun burns weak and red.", ms: 4000 },
@@ -215,7 +223,7 @@
       { text: "A clone, an experiment, a prisoner.", ms: 4000 },
       { text: "", ms: 900 },
 
-      { text: "These \"men\" as they once fathomed themselves.", ms: 4000 },
+      { text: "These \"men,\" as they once fashioned themselves.", ms: 4000 },
       { text: "Poisoned the Earth.", ms: 3000 },
       { text: "Hardened their bodies.", ms: 3000 },
       { text: "And created a cabal of everlasting corruption.", ms: 4000 },
@@ -225,14 +233,22 @@
       { text: "A single authority with absolute control over Earth’s biosphere.", ms: 3400 },
       { text: "Over life.", ms: 2300 },
       { text: "Over death.", ms: 2300 },
+      { text: "", ms: 1800 },
+
+      { text: "Over you.", ms: 3400 },
       { text: "", ms: 900 },
 
-      { text: "Over you.", ms: 3400 }
+      { text: "Your goal is to escape this madness.", ms: 3400 },
+      { text: "but...", ms: 3000 },
+      { text: "is it even possible?", ms: 3400 }
     ];
 
     const stage = document.getElementById("stage");
     const captionText = document.getElementById("captionText");
     const debugEl = document.getElementById("debug");
+
+    const bgLayer = document.getElementById("bgLayer");
+    const charLayer = document.getElementById("charLayer");
 
     const amadeusCard = document.getElementById("amadeusCard");
     let aristocratCard = document.getElementById("aristocratCard");
@@ -244,7 +260,16 @@
       debugEl.textContent = txt;
     }
 
-    function mountImageOrFallback(cardEl, url, fallbackLabel){
+    function setCaptionText(str){
+      captionText.style.opacity = "0";
+      const safe = (str === "") ? " " : str;
+      setTimeout(() => {
+        captionText.textContent = safe;
+        captionText.style.opacity = "1";
+      }, 170);
+    }
+
+    function mountImage(cardEl, url){
       return new Promise((resolve) => {
         const img = new Image();
         img.decoding = "async";
@@ -257,21 +282,19 @@
           resolve(true);
         };
 
-        img.onerror = () => {
-          const fb = cardEl.querySelector(".fallback");
-          if (fb) fb.textContent = fallbackLabel;
-          resolve(false);
-        };
+        img.onerror = () => resolve(false);
       });
     }
 
-    function setCaptionText(str){
-      captionText.style.opacity = "0";
-      const safe = (str === "") ? " " : str;
-      setTimeout(() => {
-        captionText.textContent = safe;
-        captionText.style.opacity = "1";
-      }, 170);
+    // ---- background transform management ----
+    let bgScale = BG_SCALE_FROM;
+
+    function applyBgTransform(){
+      bgLayer.style.transform = `scale(${bgScale})`;
+    }
+    function setBgScale(s){
+      bgScale = s;
+      applyBgTransform();
     }
 
     // ---- transform management (translate + scale together) ----
@@ -295,8 +318,8 @@
       const leftStartX  = padX;
       const rightStartX = rect.width - padX - cardW;
 
-      const leftEndX  = rightStartX; // red ends where blue started
-      const rightEndX = leftStartX;  // blue ends where red started
+      const leftEndX  = rightStartX;
+      const rightEndX = leftStartX;
 
       const centerX = (rect.width - cardW) / 2;
 
@@ -307,25 +330,29 @@
       cardEl.style.transform = `translate3d(${x}px, 0px, 0px)`;
     }
 
-    function animateSwapOnce(){
+    // default placement (NO animation): Amadeus left, Aristocrat right
+    function snapToDefaultPositions(){
       const pos = computePositions();
-
-      // snap to starts
       amadeusCard.style.transition = "none";
       if (aristocratCard && aristocratCard.isConnected) aristocratCard.style.transition = "none";
 
-      // baseline scale
       setAmadeusScale(ZOOM_FROM);
-
       setAmadeusX(pos.leftStartX);
+
       if (aristocratCard && aristocratCard.isConnected){
         setCardX(aristocratCard, pos.rightStartX);
       }
 
-      // flush
-      void amadeusCard.offsetHeight;
+      // baseline background scale too
+      bgLayer.style.transition = "none";
+      setBgScale(BG_SCALE_FROM);
 
-      // animate to swapped endpoints (FLAT-ish middle speed)
+      void amadeusCard.offsetHeight; // flush
+    }
+
+    function animateSwapOnce(){
+      const pos = computePositions();
+
       amadeusCard.style.transition = `transform ${MOVE_MS}ms ${MOVE_EASE}`;
       if (aristocratCard && aristocratCard.isConnected){
         aristocratCard.style.transition = `transform ${MOVE_MS}ms ${MOVE_EASE}`;
@@ -350,7 +377,6 @@
       return text === DELETE_BLUE_ON_TEXT || text.includes(DELETE_BLUE_ON_TEXT);
     }
 
-    // total remaining story time AFTER the delete cue (used for zoom duration)
     function calcZoomDurationAfterDelete(){
       const idx = storyCues.findIndex(c => isDeleteCueText(c.text));
       if (idx === -1) return 0;
@@ -362,16 +388,23 @@
     }
 
     function startAmadeusZoomUntilStoryEnds(){
-      const zoomDuration = calcZoomDurationAfterDelete();
+      const zoomDuration = calcZoomDurationAfterDelete() / 2.5;
       if (zoomDuration <= 0){
         setAmadeusScale(ZOOM_TO);
+        setBgScale(BG_SCALE_TO);
         return;
       }
+
+      // sync both transitions (same duration + same easing)
       amadeusCard.style.transition = `transform ${zoomDuration}ms ${ZOOM_EASE}`;
-      requestAnimationFrame(() => setAmadeusScale(ZOOM_TO));
+      bgLayer.style.transition     = `transform ${zoomDuration}ms ${ZOOM_EASE}`;
+
+      requestAnimationFrame(() => {
+        setAmadeusScale(ZOOM_TO);
+        setBgScale(BG_SCALE_TO);
+      });
     }
 
-    // ---- story sequencer ----
     let blueDeleted = false;
     let zoomStarted = false;
 
@@ -384,18 +417,61 @@
       }
       aristocratCard = null;
 
-      animateRedToCenter();
+      // ✅ wait 2 seconds before Amadeus slides back to center
+      setTimeout(() => {
+        animateRedToCenter();
 
-      if (!zoomStarted){
-        zoomStarted = true;
-        setTimeout(() => startAmadeusZoomUntilStoryEnds(), SOLO_SLIDE_MS);
+        if (!zoomStarted){
+          zoomStarted = true;
+          // zoom (and bg shrink) begins when red finishes recenter
+          setTimeout(() => startAmadeusZoomUntilStoryEnds(), SOLO_SLIDE_MS);
+        }
+      }, DELAY_BEFORE_RED_RECENTER_MS);
+    }
+
+    // ---- staged start ----
+    let bgShown = false;
+    let actorsShown = false;
+    let motionStarted = false;
+
+    function showBackgroundIfNeeded(text){
+      if (bgShown) return;
+      if (!text) return;
+      if (text === BG_FADE_ON_TEXT || text.includes(BG_FADE_ON_TEXT)){
+        bgShown = true;
+        bgLayer.classList.add("isVisible");
+      }
+    }
+
+    function showActorsAndStartMotionIfNeeded(text){
+      if (actorsShown) return;
+      if (!text) return;
+
+      if (text === ACTORS_FADE_ON_EXACT || text.includes(ACTORS_FADE_ON_EXACT)){
+        actorsShown = true;
+
+        // fade in actors
+        charLayer.classList.add("isVisible");
+
+        // kick swap after they become visible
+        if (!motionStarted){
+          motionStarted = true;
+          requestAnimationFrame(() => animateSwapOnce());
+        }
       }
     }
 
     async function playStory(){
       for (let i = 0; i < storyCues.length; i++){
         const cue = storyCues[i];
+
         setCaptionText(cue.text);
+
+        // background fades in during the first line
+        showBackgroundIfNeeded(cue.text);
+
+        // actors fade in AND the swap starts when the "These men..." line hits
+        showActorsAndStartMotionIfNeeded(cue.text);
 
         if (isDeleteCueText(cue.text)){
           await wait(cue.ms + EXTRA_HOLD_BEFORE_DELETE_MS);
@@ -408,20 +484,34 @@
     }
 
     async function init(){
+      // start hidden
+      bgLayer.classList.remove("isVisible");
+      charLayer.classList.remove("isVisible");
+
+      // mount images (no placeholders)
       await Promise.all([
-        mountImageOrFallback(amadeusCard, AMADEUS_IMG, "AMADEUS"),
-        mountImageOrFallback(aristocratCard, ARISTOCRAT_IMG, "ARISTOCRAT")
+        mountImage(amadeusCard, AMADEUS_IMG),
+        mountImage(aristocratCard, ARISTOCRAT_IMG)
       ]);
 
-      // ensure red precedence
-      amadeusCard.style.zIndex = "4";
+      // Put them in DEFAULT (red left, blue right), but hidden
+      snapToDefaultPositions();
 
+      // Start captions
       setCaptionText(storyCues[0]?.text ?? " ");
+      // Trigger background immediately (since first line shows right away)
+      showBackgroundIfNeeded(storyCues[0]?.text ?? "");
 
-      animateSwapOnce();
+      // Story loop controls when actors appear + when motion begins
       playStory();
 
-      addEventListener("resize", () => setDebug("resized"), { passive:true });
+      addEventListener("resize", () => {
+        // if motion hasn't started yet, keep default snap
+        if (!motionStarted){
+          snapToDefaultPositions();
+        }
+        setDebug("resized");
+      }, { passive:true });
     }
 
     init().catch(err => {
