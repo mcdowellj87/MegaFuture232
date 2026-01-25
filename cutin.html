@@ -44,24 +44,39 @@
       background:#000;
     }
 
-    /* ===== Full background behind actors (no crop) ===== */
-    .bgLayer{
+    /* ===== Background stack behind actors (no crop) ===== */
+    .bgStack{
       position:absolute;
       inset:0;
       pointer-events:none;
       z-index: 1;
-      background: url("images/blood_bay.png") center center no-repeat;
+
+      opacity: 0;
+      transition: opacity 2800ms ease;
+
+      transform: scale(1);
+      transform-origin: center center;
+      will-change: transform, opacity;
+    }
+    .bgStack.isVisible{ opacity: 1; }
+
+    .bgFrame{
+      position:absolute;
+      inset:0;
+      background-position: center center;
+      background-repeat: no-repeat;
       background-size: contain;
 
       opacity: 0;
-      transform: scale(1);
-      transition:
-        opacity 2800ms ease,
-        transform 0ms linear; /* JS will set timing when shrink begins */
-      will-change: transform, opacity;
-      transform-origin: center center;
+      transition: opacity 900ms ease;
+      will-change: opacity;
     }
-    .bgLayer.isVisible{ opacity: 1; }
+    .bgFrame.isOn{ opacity: 1; }
+
+    /* NEW: simultaneous fadeout (bg2..bg5 only) */
+    .bgFrame.fadeOut{
+      opacity: 0 !important;
+    }
 
     .charLayer{
       position:absolute;
@@ -119,7 +134,6 @@
       transition: opacity 260ms ease;
     }
 
-    /* Cards: auto-sized to image, no cropping */
     .card{
       position:absolute;
       top: 10%;
@@ -169,7 +183,15 @@
 
   <div id="mfModal">
     <div class="stage" id="stage">
-      <div class="bgLayer" id="bgLayer" aria-hidden="true"></div>
+
+      <!-- Background stack -->
+      <div class="bgStack" id="bgStack" aria-hidden="true">
+        <div class="bgFrame" id="bg1"></div>
+        <div class="bgFrame" id="bg2"></div>
+        <div class="bgFrame" id="bg3"></div>
+        <div class="bgFrame" id="bg4"></div>
+        <div class="bgFrame" id="bg5"></div>
+      </div>
 
       <div class="charLayer" id="charLayer">
         <div class="card" id="amadeusCard" aria-hidden="true"></div>
@@ -189,21 +211,38 @@
     const AMADEUS_IMG    = "images/amadeus.png";
     const ARISTOCRAT_IMG = "images/aristocrat.png";
 
-    // Fade cues (match your exact line)
+    // Background frames
+    const BLOOD_BAY_1 = "images/blood_bay_1.png";
+    const BLOOD_BAY_2 = "images/blood_bay_2.png";
+    const BLOOD_BAY_3 = "images/blood_bay_3.png";
+    const BLOOD_BAY_4 = "images/blood_bay_4.png";
+    const BLOOD_BAY_5 = "images/blood_bay_5.png";
+
+    // Fade cues
     const BG_FADE_ON_TEXT = "It is a time when the sun burns weak and red.";
     const ACTORS_FADE_ON_EXACT = "These \"men,\" as they once fashioned themselves.";
 
-    // Motion timing (same as your previous)
+    // Background step triggers
+    const BG2_ON_TEXT = "You are of the two remaining immortals.";
+    const BG3_ON_TEXT = "A clone.";
+    const BG4_ON_TEXT = "An experiment.";
+    const BG5_ON_TEXT = "A prisoner.";
+
+    // NEW: after "A prisoner." cleanup timing
+    const PRISONER_WAIT_BEFORE_CLEANUP_MS = 4000;   // wait 4s
+    const PRISONER_EXTRA_WAIT_BEFORE_ACTORS_MS = 2000; // then wait 2s
+    const BG_FADE_OUT_MS = 900; // must match CSS transition for .bgFrame
+
+    // Motion timing
     const MOVE_MS = 24000;
     const SOLO_SLIDE_MS = 8000;
 
+    // Zoom and synced background shrink (2x faster)
     const ZOOM_FROM = 1.00;
     const ZOOM_TO   = 1.22;
     const ZOOM_EASE = "linear";
 
-    // Background shrink should match Amadeus zoom timing
     const BG_SCALE_FROM = 1.00;
-    // choose a pleasing inverse (not literal inverse math)
     const BG_SCALE_TO   = 0.88;
 
     const MOVE_EASE = "cubic-bezier(0.10, 0.00, 0.90, 1.00)";
@@ -220,7 +259,9 @@
       { text: "", ms: 900 },
 
       { text: "You are of the two remaining immortals.", ms: 4000 },
-      { text: "A clone, an experiment, a prisoner.", ms: 4000 },
+      { text: "A clone.", ms: 2400 },
+      { text: "An experiment.", ms: 2400 },
+      { text: "A prisoner.", ms: 2400 },
       { text: "", ms: 900 },
 
       { text: "These \"men,\" as they once fashioned themselves.", ms: 4000 },
@@ -247,9 +288,14 @@
     const captionText = document.getElementById("captionText");
     const debugEl = document.getElementById("debug");
 
-    const bgLayer = document.getElementById("bgLayer");
-    const charLayer = document.getElementById("charLayer");
+    const bgStack = document.getElementById("bgStack");
+    const bg1 = document.getElementById("bg1");
+    let bg2 = document.getElementById("bg2");
+    let bg3 = document.getElementById("bg3");
+    let bg4 = document.getElementById("bg4");
+    let bg5 = document.getElementById("bg5");
 
+    const charLayer = document.getElementById("charLayer");
     const amadeusCard = document.getElementById("amadeusCard");
     let aristocratCard = document.getElementById("aristocratCard");
 
@@ -286,16 +332,26 @@
       });
     }
 
+    function setBgFrame(el, url){
+      if (!el) return;
+      el.style.backgroundImage = `url("${url}")`;
+    }
+
+    function preloadImages(urls){
+      return Promise.all(urls.map(url => new Promise((resolve) => {
+        const img = new Image();
+        img.decoding = "async";
+        img.loading = "eager";
+        img.src = url;
+        img.onload = () => resolve(true);
+        img.onerror = () => resolve(false);
+      })));
+    }
+
     // ---- background transform management ----
     let bgScale = BG_SCALE_FROM;
-
-    function applyBgTransform(){
-      bgLayer.style.transform = `scale(${bgScale})`;
-    }
-    function setBgScale(s){
-      bgScale = s;
-      applyBgTransform();
-    }
+    function applyBgTransform(){ bgStack.style.transform = `scale(${bgScale})`; }
+    function setBgScale(s){ bgScale = s; applyBgTransform(); }
 
     // ---- transform management (translate + scale together) ----
     let amadeusX = 0;
@@ -322,7 +378,6 @@
       const rightEndX = leftStartX;
 
       const centerX = (rect.width - cardW) / 2;
-
       return { leftStartX, rightStartX, leftEndX, rightEndX, centerX };
     }
 
@@ -330,7 +385,6 @@
       cardEl.style.transform = `translate3d(${x}px, 0px, 0px)`;
     }
 
-    // default placement (NO animation): Amadeus left, Aristocrat right
     function snapToDefaultPositions(){
       const pos = computePositions();
       amadeusCard.style.transition = "none";
@@ -343,11 +397,10 @@
         setCardX(aristocratCard, pos.rightStartX);
       }
 
-      // baseline background scale too
-      bgLayer.style.transition = "none";
+      bgStack.style.transition = "none";
       setBgScale(BG_SCALE_FROM);
 
-      void amadeusCard.offsetHeight; // flush
+      void amadeusCard.offsetHeight;
     }
 
     function animateSwapOnce(){
@@ -387,17 +440,16 @@
       return Math.max(0, sum);
     }
 
-    function startAmadeusZoomUntilStoryEnds(){
-      const zoomDuration = calcZoomDurationAfterDelete() / 2.5;
+    function startAmadeusZoomAndBgShrinkUntilStoryEnds(){
+      const zoomDuration = calcZoomDurationAfterDelete() / 2; // 2x faster
       if (zoomDuration <= 0){
         setAmadeusScale(ZOOM_TO);
         setBgScale(BG_SCALE_TO);
         return;
       }
 
-      // sync both transitions (same duration + same easing)
       amadeusCard.style.transition = `transform ${zoomDuration}ms ${ZOOM_EASE}`;
-      bgLayer.style.transition     = `transform ${zoomDuration}ms ${ZOOM_EASE}`;
+      bgStack.style.transition     = `transform ${zoomDuration}ms ${ZOOM_EASE}`;
 
       requestAnimationFrame(() => {
         setAmadeusScale(ZOOM_TO);
@@ -417,14 +469,12 @@
       }
       aristocratCard = null;
 
-      // ✅ wait 2 seconds before Amadeus slides back to center
       setTimeout(() => {
         animateRedToCenter();
 
         if (!zoomStarted){
           zoomStarted = true;
-          // zoom (and bg shrink) begins when red finishes recenter
-          setTimeout(() => startAmadeusZoomUntilStoryEnds(), SOLO_SLIDE_MS);
+          setTimeout(() => startAmadeusZoomAndBgShrinkUntilStoryEnds(), SOLO_SLIDE_MS);
         }
       }, DELAY_BEFORE_RED_RECENTER_MS);
     }
@@ -434,79 +484,170 @@
     let actorsShown = false;
     let motionStarted = false;
 
+    // background progression
+    let bg2On = false, bg3On = false, bg4On = false, bg5On = false;
+
+    // NEW: prisoner cleanup state + actor scheduling
+    let cleanupStarted = false;
+    let cleanupDoneAt = 0;              // performance.now() timestamp when actors may appear
+    let actorsRevealScheduled = false;  // avoid double scheduling
+
     function showBackgroundIfNeeded(text){
       if (bgShown) return;
       if (!text) return;
       if (text === BG_FADE_ON_TEXT || text.includes(BG_FADE_ON_TEXT)){
         bgShown = true;
-        bgLayer.classList.add("isVisible");
+        bgStack.classList.add("isVisible");
       }
     }
 
-    function showActorsAndStartMotionIfNeeded(text){
-      if (actorsShown) return;
+    function startPrisonerCleanupTimeline(){
+      if (cleanupStarted) return;
+      cleanupStarted = true;
+
+      // compute when actors are allowed to appear:
+      // now + 4s + fadeOutMs + 2s
+      const now = performance.now();
+      cleanupDoneAt = now + PRISONER_WAIT_BEFORE_CLEANUP_MS + BG_FADE_OUT_MS + PRISONER_EXTRA_WAIT_BEFORE_ACTORS_MS;
+
+      (async () => {
+        await wait(PRISONER_WAIT_BEFORE_CLEANUP_MS);
+
+        // fade out bg2..bg5 simultaneously
+        [bg2, bg3, bg4, bg5].forEach(el => {
+          if (el && el.isConnected) el.classList.add("fadeOut");
+        });
+
+        await wait(BG_FADE_OUT_MS);
+
+        // delete bg2..bg5 from DOM
+        [bg2, bg3, bg4, bg5].forEach(el => {
+          if (el && el.isConnected) el.remove();
+        });
+
+        bg2 = bg3 = bg4 = bg5 = null;
+
+        // (we DON'T trigger actors here; we only "allow" them — reveal is still tied to These men)
+      })();
+    }
+
+    function progressBackgroundFramesIfNeeded(text){
       if (!text) return;
 
-      if (text === ACTORS_FADE_ON_EXACT || text.includes(ACTORS_FADE_ON_EXACT)){
-        actorsShown = true;
-
-        // fade in actors
-        charLayer.classList.add("isVisible");
-
-        // kick swap after they become visible
-        if (!motionStarted){
-          motionStarted = true;
-          requestAnimationFrame(() => animateSwapOnce());
-        }
+      if (!bg2On && (text === BG2_ON_TEXT || text.includes(BG2_ON_TEXT))){
+        bg2On = true;
+        bg2?.classList.add("isOn");
+        return;
+      }
+      if (!bg3On && (text === BG3_ON_TEXT || text.includes(BG3_ON_TEXT))){
+        bg3On = true;
+        bg3?.classList.add("isOn");
+        return;
+      }
+      if (!bg4On && (text === BG4_ON_TEXT || text.includes(BG4_ON_TEXT))){
+        bg4On = true;
+        bg4?.classList.add("isOn");
+        return;
+      }
+      if (!bg5On && (text === BG5_ON_TEXT || text.includes(BG5_ON_TEXT))){
+        bg5On = true;
+        bg5?.classList.add("isOn");
+        // kick the cleanup timeline right after prisoner turns on
+        startPrisonerCleanupTimeline();
+        return;
       }
     }
 
-    async function playStory(){
-      for (let i = 0; i < storyCues.length; i++){
-        const cue = storyCues[i];
+    function revealActorsAndStartMotion(){
+      if (actorsShown) return;
+      actorsShown = true;
 
-        setCaptionText(cue.text);
+      charLayer.classList.add("isVisible");
 
-        // background fades in during the first line
-        showBackgroundIfNeeded(cue.text);
-
-        // actors fade in AND the swap starts when the "These men..." line hits
-        showActorsAndStartMotionIfNeeded(cue.text);
-
-        if (isDeleteCueText(cue.text)){
-          await wait(cue.ms + EXTRA_HOLD_BEFORE_DELETE_MS);
-          deleteBlueNow();
-          continue;
-        }
-
-        await wait(cue.ms);
+      if (!motionStarted){
+        motionStarted = true;
+        requestAnimationFrame(() => animateSwapOnce());
       }
     }
+
+// NOTE: we no longer reveal actors here for the "These men..." cue,
+// because we want caption + actor reveal to happen at the same moment.
+// So this function can stay for other triggers if you want, but here it does nothing.
+function showActorsAndStartMotionIfNeeded(text){
+  // intentionally no-op for ACTORS_FADE_ON_EXACT
+}
+
+async function playStory(){
+  for (let i = 0; i < storyCues.length; i++){
+    const cue = storyCues[i];
+
+    // Always progress background + cleanup scheduling based on the raw cue text
+    showBackgroundIfNeeded(cue.text);
+    progressBackgroundFramesIfNeeded(cue.text);
+
+    // SPECIAL: sync "These men" caption to actor reveal time (when cleanup is involved)
+    const isTheseMen = cue.text && (cue.text === ACTORS_FADE_ON_EXACT || cue.text.includes(ACTORS_FADE_ON_EXACT));
+
+    if (isTheseMen && cleanupStarted && !actorsShown){
+      // Wait until the cleanup timeline finishes (4s + fade + 2s), then show caption + actors together
+      const delay = Math.max(0, cleanupDoneAt - performance.now());
+      if (delay > 0) await wait(delay);
+
+      // Now: caption appears + actors fade in at the same time
+      setCaptionText(cue.text);
+      revealActorsAndStartMotion();
+
+      // Hold this cue's duration AFTER it becomes visible
+      await wait(cue.ms);
+      continue;
+    }
+
+    // Normal behavior for all other cues
+    setCaptionText(cue.text);
+
+    // Actor reveal when there's no cleanup gating (original behavior)
+    if (isTheseMen && !cleanupStarted){
+      revealActorsAndStartMotion();
+    }
+
+    if (isDeleteCueText(cue.text)){
+      await wait(cue.ms + EXTRA_HOLD_BEFORE_DELETE_MS);
+      deleteBlueNow();
+      continue;
+    }
+
+    await wait(cue.ms);
+  }
+}
 
     async function init(){
-      // start hidden
-      bgLayer.classList.remove("isVisible");
+      bgStack.classList.remove("isVisible");
       charLayer.classList.remove("isVisible");
 
-      // mount images (no placeholders)
+      // set background images
+      setBgFrame(bg1, BLOOD_BAY_1);
+      setBgFrame(bg2, BLOOD_BAY_2);
+      setBgFrame(bg3, BLOOD_BAY_3);
+      setBgFrame(bg4, BLOOD_BAY_4);
+      setBgFrame(bg5, BLOOD_BAY_5);
+
+      bg1.classList.add("isOn");
+
+      await preloadImages([BLOOD_BAY_1, BLOOD_BAY_2, BLOOD_BAY_3, BLOOD_BAY_4, BLOOD_BAY_5]);
+
       await Promise.all([
         mountImage(amadeusCard, AMADEUS_IMG),
         mountImage(aristocratCard, ARISTOCRAT_IMG)
       ]);
 
-      // Put them in DEFAULT (red left, blue right), but hidden
       snapToDefaultPositions();
 
-      // Start captions
       setCaptionText(storyCues[0]?.text ?? " ");
-      // Trigger background immediately (since first line shows right away)
       showBackgroundIfNeeded(storyCues[0]?.text ?? "");
 
-      // Story loop controls when actors appear + when motion begins
       playStory();
 
       addEventListener("resize", () => {
-        // if motion hasn't started yet, keep default snap
         if (!motionStarted){
           snapToDefaultPositions();
         }
