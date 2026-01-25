@@ -232,6 +232,657 @@
 </head>
 
 <body>
+  <!-- =========================
+     OPENING CUTSCENE TEMPLATE
+========================= -->
+<template id="mfCutsceneTpl">
+  <div id="mfCutsceneModal" aria-hidden="false">
+    <div class="stage" id="cs-stage">
+      <div class="bgStack" id="cs-bgStack" aria-hidden="true">
+        <div class="bgFrame" id="cs-bg1"></div>
+        <div class="bgFrame" id="cs-bg2"></div>
+        <div class="bgFrame" id="cs-bg3"></div>
+        <div class="bgFrame" id="cs-bg4"></div>
+        <div class="bgFrame" id="cs-bg5"></div>
+      </div>
+
+      <div class="charLayer" id="cs-charLayer">
+        <div class="card" id="cs-amadeusCard" aria-hidden="true"></div>
+        <div class="card" id="cs-aristocratCard" aria-hidden="true"></div>
+      </div>
+
+      <div class="captionBar">
+        <div class="captionPanel">
+          <div id="cs-captionText"></div>
+        </div>
+      </div>
+
+      <!-- subtle prompt (shows during playback + end) -->
+      <div class="csPrompt" id="csPrompt"></div>
+    </div>
+  </div>
+</template>
+
+<style>
+  /* ===== Cutscene scoped styles ===== */
+  #mfCutsceneModal{
+    position:fixed;
+    inset:0;
+    display:grid;
+    place-items:center;
+    background:#000;
+    user-select:none;
+    overflow:hidden;
+    z-index: 100000; /* above everything */
+  }
+
+  #mfCutsceneModal .stage{
+    width:min(92vw, 1100px);
+    aspect-ratio:16/9;
+    position:relative;
+    display:grid;
+    place-items:center;
+    border-radius:18px;
+    overflow:hidden;
+    background:#000;
+  }
+
+  #mfCutsceneModal .bgStack{
+    position:absolute;
+    inset:0;
+    pointer-events:none;
+    z-index: 1;
+    opacity: 0;
+    transition: opacity 2800ms ease;
+    transform: scale(1);
+    transform-origin: center center;
+    will-change: transform, opacity;
+  }
+  #mfCutsceneModal .bgStack.isVisible{ opacity: 1; }
+
+  #mfCutsceneModal .bgFrame{
+    position:absolute;
+    inset:0;
+    background-position:center center;
+    background-repeat:no-repeat;
+    background-size:contain;
+    opacity: 0;
+    transition: opacity 900ms ease;
+    will-change: opacity;
+  }
+  #mfCutsceneModal .bgFrame.isOn{ opacity: 1; }
+  #mfCutsceneModal .bgFrame.fadeOut{ opacity: 0 !important; }
+
+  #mfCutsceneModal .charLayer{
+    position:absolute;
+    inset:0;
+    pointer-events:none;
+    z-index: 2;
+    opacity: 0;
+    transition: opacity 1400ms ease;
+  }
+  #mfCutsceneModal .charLayer.isVisible{ opacity: 1; }
+
+  #mfCutsceneModal .captionBar{
+    position:absolute;
+    left:0; right:0; bottom:0;
+    height:28%;
+    display:flex;
+    align-items:flex-end;
+    justify-content:center;
+    padding: 0 18px 18px;
+    box-sizing:border-box;
+    background: linear-gradient(to top, rgba(0,0,0,.92), rgba(0,0,0,.10) 70%, rgba(0,0,0,0));
+    pointer-events:none;
+    z-index: 3;
+  }
+
+  #mfCutsceneModal .captionPanel{
+    width:min(92%, 900px);
+    min-height: 84px;
+    max-height: 160px;
+    padding: 14px 16px;
+    box-sizing:border-box;
+    border-radius: 14px;
+    background: rgba(0,0,0,.82);
+    border: 1px solid rgba(255,255,255,.08);
+    backdrop-filter: blur(6px);
+    display:flex;
+    align-items:center;
+    justify-content:center;
+  }
+
+  #mfCutsceneModal #cs-captionText{
+    font-family: "Orbitron", system-ui, sans-serif;
+    font-weight: 500;
+    font-size: clamp(12px, 1.45vw, 16px);
+    line-height: 1.45;
+    letter-spacing: 0.02em;
+    text-align:center;
+    color: rgba(255,255,255,.72);
+    white-space: pre-wrap;
+    min-height: 1.5em;
+    width:100%;
+    transition: opacity 260ms ease;
+  }
+
+  #mfCutsceneModal .card{
+    position:absolute;
+    top: 10%;
+    display:inline-block;
+    width:auto;
+    height:auto;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    will-change: transform;
+    transform-origin: center center;
+  }
+
+  #mfCutsceneModal #cs-amadeusCard{ z-index: 4; }
+  #mfCutsceneModal #cs-aristocratCard{ z-index: 3; }
+
+  #mfCutsceneModal .card img{
+    display:block;
+    width:auto;
+    height:auto;
+    max-width: min(40vw, 520px);
+    max-height: min(58vh, 600px);
+    object-fit: contain;
+    background: transparent;
+  }
+
+  #mfCutsceneModal .csPrompt{
+    position:absolute;
+    left:50%;
+    top: 14px;
+    transform: translateX(-50%);
+    font-family: system-ui, sans-serif;
+    font-size: 12px;
+    letter-spacing: .08em;
+    color: rgba(255,255,255,.40);
+    user-select:none;
+    pointer-events:none;
+    z-index: 10;
+  }
+</style>
+<script>
+(() => {
+  // Public API: window.MF_Cutscene.play({ onStartGame })
+  // - onStartGame: async function called AFTER cutscene finishes and user presses "start"
+
+  const wait = (ms) => new Promise(r => setTimeout(r, ms));
+
+  function mountTemplate(){
+    const tpl = document.getElementById('mfCutsceneTpl');
+    const frag = tpl.content.cloneNode(true);
+    document.body.appendChild(frag);
+    return document.getElementById('mfCutsceneModal');
+  }
+
+  function removeModal(modal){
+    if (modal && modal.parentNode) modal.parentNode.removeChild(modal);
+  }
+
+  async function mountImage(cardEl, url){
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.decoding = "async";
+      img.loading = "eager";
+      img.src = url;
+      img.onload = () => { cardEl.innerHTML = ""; cardEl.appendChild(img); resolve(true); };
+      img.onerror = () => resolve(false);
+    });
+  }
+
+  function setBgFrame(el, url){
+    if (!el) return;
+    el.style.backgroundImage = `url("${url}")`;
+  }
+
+  function preloadImages(urls){
+    return Promise.all(urls.map(url => new Promise((resolve) => {
+      const img = new Image();
+      img.decoding = "async";
+      img.loading = "eager";
+      img.src = url;
+      img.onload = () => resolve(true);
+      img.onerror = () => resolve(false);
+    })));
+  }
+
+  window.MF_Cutscene = {
+    async play({ onStartGame } = {}){
+      // ---- FILES (same as your cutscene page) ----
+      const AMADEUS_IMG    = "images/amadeus.png";
+      const ARISTOCRAT_IMG = "images/aristocrat.png";
+
+      const BLOOD_BAY_1 = "images/blood_bay_1.png";
+      const BLOOD_BAY_2 = "images/blood_bay_2.png";
+      const BLOOD_BAY_3 = "images/blood_bay_3.png";
+      const BLOOD_BAY_4 = "images/blood_bay_4.png";
+      const BLOOD_BAY_5 = "images/blood_bay_5.png";
+
+      const BG_FADE_ON_TEXT = "It is a time when the sun burns weak and red.";
+      const ACTORS_FADE_ON_EXACT = "These \"men,\" as they once fashioned themselves.";
+
+      const BG2_ON_TEXT = "You are of the two remaining immortals.";
+      const BG3_ON_TEXT = "A clone.";
+      const BG4_ON_TEXT = "An experiment.";
+      const BG5_ON_TEXT = "A prisoner.";
+
+      const PRISONER_WAIT_BEFORE_CLEANUP_MS = 4000;
+      const PRISONER_EXTRA_WAIT_BEFORE_ACTORS_MS = 2000;
+      const BG_FADE_OUT_MS = 900;
+
+      const MOVE_MS = 24000;
+      const SOLO_SLIDE_MS = 8000;
+
+      const ZOOM_FROM = 1.00;
+      const ZOOM_TO   = 1.22;
+      const ZOOM_EASE = "linear";
+
+      const BG_SCALE_FROM = 1.00;
+      const BG_SCALE_TO   = 0.88;
+
+      const MOVE_EASE = "cubic-bezier(0.10, 0.00, 0.90, 1.00)";
+      const SOLO_EASE = "cubic-bezier(0.10, 0.00, 0.90, 1.00)";
+
+      const DELETE_BLUE_ON_TEXT = "In their infighting, only one remained.";
+      const EXTRA_HOLD_BEFORE_DELETE_MS = 5000;
+      const DELAY_BEFORE_RED_RECENTER_MS = 2000;
+
+      const storyCues = [
+        { text: "It is a time when the sun burns weak and red.", ms: 4000 },
+        { text: "The days are long and the seasons are cold.", ms: 5000 },
+        { text: "This is The MegaFuture", ms: 3000 },
+        { text: "", ms: 900 },
+
+        { text: "You are of the two remaining immortals.", ms: 4000 },
+        { text: "A clone.", ms: 2400 },
+        { text: "An experiment.", ms: 2400 },
+        { text: "A prisoner.", ms: 2400 },
+        { text: "", ms: 900 },
+
+        { text: "These \"men,\" as they once fashioned themselves.", ms: 4000 },
+        { text: "Poisoned the Earth.", ms: 3000 },
+        { text: "Hardened their bodies.", ms: 3000 },
+        { text: "And created a cabal of everlasting corruption.", ms: 4000 },
+        { text: "In their infighting, only one remained.", ms: 4000 },
+        { text: "", ms: 2000 },
+
+        { text: "A single authority with absolute control over Earth’s biosphere.", ms: 3400 },
+        { text: "Over life.", ms: 2300 },
+        { text: "Over death.", ms: 2300 },
+        { text: "", ms: 1800 },
+
+        { text: "Over you.", ms: 3400 },
+        { text: "", ms: 900 },
+
+        { text: "Your goal is to escape this madness.", ms: 3400 },
+        { text: "but...", ms: 3000 },
+        { text: "is it even possible?", ms: 3400 }
+      ];
+
+      // ---- mount DOM ----
+      const modal = mountTemplate();
+
+      const stage = modal.querySelector("#cs-stage");
+      const captionText = modal.querySelector("#cs-captionText");
+      const promptEl = modal.querySelector("#csPrompt");
+
+      const bgStack = modal.querySelector("#cs-bgStack");
+      const bg1 = modal.querySelector("#cs-bg1");
+      let bg2 = modal.querySelector("#cs-bg2");
+      let bg3 = modal.querySelector("#cs-bg3");
+      let bg4 = modal.querySelector("#cs-bg4");
+      let bg5 = modal.querySelector("#cs-bg5");
+
+      const charLayer = modal.querySelector("#cs-charLayer");
+      const amadeusCard = modal.querySelector("#cs-amadeusCard");
+      let aristocratCard = modal.querySelector("#cs-aristocratCard");
+
+      // ---- helpers ----
+      function setCaptionText(str){
+        captionText.style.opacity = "0";
+        const safe = (str === "") ? " " : str;
+        setTimeout(() => {
+          captionText.textContent = safe;
+          captionText.style.opacity = "1";
+        }, 170);
+      }
+
+      let bgScale = BG_SCALE_FROM;
+      function setBgScale(s){
+        bgScale = s;
+        bgStack.style.transform = `scale(${bgScale})`;
+      }
+
+      let amadeusX = 0;
+      let amadeusScale = ZOOM_FROM;
+      function applyAmadeusTransform(){
+        amadeusCard.style.transform = `translate3d(${amadeusX}px, 0px, 0px) scale(${amadeusScale})`;
+      }
+      function setAmadeusX(x){ amadeusX = x; applyAmadeusTransform(); }
+      function setAmadeusScale(s){ amadeusScale = s; applyAmadeusTransform(); }
+      function setCardX(cardEl, x){ cardEl.style.transform = `translate3d(${x}px, 0px, 0px)`; }
+
+      function computePositions(){
+        const rect = stage.getBoundingClientRect();
+        const aRect = amadeusCard.getBoundingClientRect();
+        const cardW = aRect.width;
+        const padX = Math.max(18, rect.width * 0.035);
+        const leftStartX  = padX;
+        const rightStartX = rect.width - padX - cardW;
+        const leftEndX  = rightStartX;
+        const rightEndX = leftStartX;
+        const centerX = (rect.width - cardW) / 2;
+        return { leftStartX, rightStartX, leftEndX, rightEndX, centerX };
+      }
+
+      function snapToDefaultPositions(){
+        const pos = computePositions();
+        amadeusCard.style.transition = "none";
+        if (aristocratCard && aristocratCard.isConnected) aristocratCard.style.transition = "none";
+
+        setAmadeusScale(ZOOM_FROM);
+        setAmadeusX(pos.leftStartX);
+
+        if (aristocratCard && aristocratCard.isConnected) setCardX(aristocratCard, pos.rightStartX);
+
+        bgStack.style.transition = "none";
+        setBgScale(BG_SCALE_FROM);
+
+        void amadeusCard.offsetHeight;
+      }
+
+      function animateSwapOnce(){
+        const pos = computePositions();
+        amadeusCard.style.transition = `transform ${MOVE_MS}ms ${MOVE_EASE}`;
+        if (aristocratCard && aristocratCard.isConnected){
+          aristocratCard.style.transition = `transform ${MOVE_MS}ms ${MOVE_EASE}`;
+        }
+        requestAnimationFrame(() => {
+          setAmadeusX(pos.leftEndX);
+          if (aristocratCard && aristocratCard.isConnected) setCardX(aristocratCard, pos.rightEndX);
+        });
+      }
+
+      function animateRedToCenter(){
+        const pos = computePositions();
+        amadeusCard.style.transition = `transform ${SOLO_SLIDE_MS}ms ${SOLO_EASE}`;
+        requestAnimationFrame(() => setAmadeusX(pos.centerX));
+      }
+
+      function isDeleteCueText(text){
+        if (!text) return false;
+        return text === DELETE_BLUE_ON_TEXT || text.includes(DELETE_BLUE_ON_TEXT);
+      }
+
+      function calcZoomDurationAfterDelete(){
+        const idx = storyCues.findIndex(c => isDeleteCueText(c.text));
+        if (idx === -1) return 0;
+        let sum = 0;
+        for (let i = idx + 1; i < storyCues.length; i++) sum += (storyCues[i]?.ms || 0);
+        return Math.max(0, sum);
+      }
+
+      function startAmadeusZoomAndBgShrinkUntilStoryEnds(){
+        const zoomDuration = calcZoomDurationAfterDelete() / 2; // 2x faster
+        if (zoomDuration <= 0){
+          setAmadeusScale(ZOOM_TO);
+          setBgScale(BG_SCALE_TO);
+          return;
+        }
+        amadeusCard.style.transition = `transform ${zoomDuration}ms ${ZOOM_EASE}`;
+        bgStack.style.transition     = `transform ${zoomDuration}ms ${ZOOM_EASE}`;
+        requestAnimationFrame(() => {
+          setAmadeusScale(ZOOM_TO);
+          setBgScale(BG_SCALE_TO);
+        });
+      }
+
+      let blueDeleted = false;
+      let zoomStarted = false;
+      function deleteBlueNow(){
+        if (blueDeleted) return;
+        blueDeleted = true;
+
+        if (aristocratCard && aristocratCard.isConnected) aristocratCard.remove();
+        aristocratCard = null;
+
+        setTimeout(() => {
+          animateRedToCenter();
+          if (!zoomStarted){
+            zoomStarted = true;
+            setTimeout(() => startAmadeusZoomAndBgShrinkUntilStoryEnds(), SOLO_SLIDE_MS);
+          }
+        }, DELAY_BEFORE_RED_RECENTER_MS);
+      }
+
+      // ---- staged start ----
+      let bgShown = false;
+      let actorsShown = false;
+      let motionStarted = false;
+
+      let bg2On = false, bg3On = false, bg4On = false, bg5On = false;
+
+      let cleanupStarted = false;
+      let cleanupDoneAt = 0;
+
+      function showBackgroundIfNeeded(text){
+        if (bgShown) return;
+        if (!text) return;
+        if (text === BG_FADE_ON_TEXT || text.includes(BG_FADE_ON_TEXT)){
+          bgShown = true;
+          bgStack.classList.add("isVisible");
+        }
+      }
+
+      function startPrisonerCleanupTimeline(){
+        if (cleanupStarted) return;
+        cleanupStarted = true;
+
+        const now = performance.now();
+        cleanupDoneAt = now + PRISONER_WAIT_BEFORE_CLEANUP_MS + BG_FADE_OUT_MS + PRISONER_EXTRA_WAIT_BEFORE_ACTORS_MS;
+
+        (async () => {
+          await wait(PRISONER_WAIT_BEFORE_CLEANUP_MS);
+
+          [bg2, bg3, bg4, bg5].forEach(el => el?.classList.add("fadeOut"));
+          await wait(BG_FADE_OUT_MS);
+
+          [bg2, bg3, bg4, bg5].forEach(el => el?.remove());
+          bg2 = bg3 = bg4 = bg5 = null;
+        })();
+      }
+
+      function progressBackgroundFramesIfNeeded(text){
+        if (!text) return;
+
+        if (!bg2On && (text === BG2_ON_TEXT || text.includes(BG2_ON_TEXT))){
+          bg2On = true; bg2?.classList.add("isOn"); return;
+        }
+        if (!bg3On && (text === BG3_ON_TEXT || text.includes(BG3_ON_TEXT))){
+          bg3On = true; bg3?.classList.add("isOn"); return;
+        }
+        if (!bg4On && (text === BG4_ON_TEXT || text.includes(BG4_ON_TEXT))){
+          bg4On = true; bg4?.classList.add("isOn"); return;
+        }
+        if (!bg5On && (text === BG5_ON_TEXT || text.includes(BG5_ON_TEXT))){
+          bg5On = true; bg5?.classList.add("isOn");
+          startPrisonerCleanupTimeline();
+          return;
+        }
+      }
+
+      function revealActorsAndStartMotion(){
+        if (actorsShown) return;
+        actorsShown = true;
+        charLayer.classList.add("isVisible");
+        if (!motionStarted){
+          motionStarted = true;
+          requestAnimationFrame(() => animateSwapOnce());
+        }
+      }
+
+      // ---- skip + end gates ----
+      let aborted = false;
+      let inPlayback = true;
+      let autoStartFromSkip = false; // ✅ if true, skip->start is the same keypress
+
+function onAnyKeyDuringPlayback(e){
+  if (e?.cancelable) e.preventDefault();
+  e?.stopPropagation?.();
+
+  if (!inPlayback) return;
+  aborted = true;                 // stop the story loop ASAP
+  autoStartFromSkip = true;       // ✅ same keypress also counts as "start"
+}
+
+      function setPrompt(text){
+        promptEl.textContent = text || "";
+      }
+
+      async function playStory(){
+        for (let i = 0; i < storyCues.length; i++){
+          if (aborted) break;
+
+          const cue = storyCues[i];
+
+          showBackgroundIfNeeded(cue.text);
+          progressBackgroundFramesIfNeeded(cue.text);
+
+          const isTheseMen = cue.text && (cue.text === ACTORS_FADE_ON_EXACT || cue.text.includes(ACTORS_FADE_ON_EXACT));
+
+          if (isTheseMen && cleanupStarted && !actorsShown){
+            const delay = Math.max(0, cleanupDoneAt - performance.now());
+            if (delay > 0) await wait(delay);
+
+            setCaptionText(cue.text);
+            revealActorsAndStartMotion();
+            await wait(cue.ms);
+            continue;
+          }
+
+          setCaptionText(cue.text);
+
+          if (isTheseMen && !cleanupStarted){
+            revealActorsAndStartMotion();
+          }
+
+          if (isDeleteCueText(cue.text)){
+            await wait(cue.ms + EXTRA_HOLD_BEFORE_DELETE_MS);
+            deleteBlueNow();
+            continue;
+          }
+
+          await wait(cue.ms);
+        }
+      }
+
+async function toEndGate(){
+  inPlayback = false;
+
+  setCaptionText(" ");
+  setPrompt("Press any key to start");
+
+  // If the user already skipped (key OR click), don't require a second press
+  if (autoStartFromSkip) return;
+
+  await new Promise((resolve) => {
+    const done = (e) => {
+      if (e?.cancelable) e.preventDefault();
+      e?.stopPropagation?.();
+
+      window.removeEventListener('keydown', onKey, true);
+      modal.removeEventListener('pointerdown', onPointer, true);
+      resolve();
+    };
+
+    const onKey = (e) => {
+      if (e.code === 'Tab') return;
+      if (e.code === 'Escape') return;
+      done(e);
+    };
+
+    const onPointer = (e) => {
+      // optional: ignore right click
+      // if (e.button === 2) return;
+      done(e);
+    };
+
+    window.addEventListener('keydown', onKey, true);
+    modal.addEventListener('pointerdown', onPointer, true);
+  });
+}
+
+      // ---- init visuals ----
+      bgStack.classList.remove("isVisible");
+      charLayer.classList.remove("isVisible");
+
+      setBgFrame(bg1, BLOOD_BAY_1);
+      setBgFrame(bg2, BLOOD_BAY_2);
+      setBgFrame(bg3, BLOOD_BAY_3);
+      setBgFrame(bg4, BLOOD_BAY_4);
+      setBgFrame(bg5, BLOOD_BAY_5);
+      bg1.classList.add("isOn");
+
+      await preloadImages([BLOOD_BAY_1, BLOOD_BAY_2, BLOOD_BAY_3, BLOOD_BAY_4, BLOOD_BAY_5]);
+
+      await Promise.all([
+        mountImage(amadeusCard, AMADEUS_IMG),
+        mountImage(aristocratCard, ARISTOCRAT_IMG),
+      ]);
+
+      snapToDefaultPositions();
+      setCaptionText(storyCues[0]?.text ?? " ");
+      showBackgroundIfNeeded(storyCues[0]?.text ?? "");
+
+// During playback: any key OR click = SKIP (but not Tab/Escape)
+setPrompt("Press any key to skip");
+
+const onKeySkip = (e) => {
+  if (e.code === 'Tab') return;
+  if (e.code === 'Escape') return;
+  onAnyKeyDuringPlayback(e);
+};
+
+// ✅ click/tap skips too (left/middle/right all count)
+const onPointerSkip = (e) => {
+  // ignore right click if you want (optional):
+  // if (e.button === 2) return;
+
+  onAnyKeyDuringPlayback(e);
+};
+
+window.addEventListener('keydown', onKeySkip, true);
+modal.addEventListener('pointerdown', onPointerSkip, true);
+
+      // Resize safety
+      const onResize = () => { if (!motionStarted) snapToDefaultPositions(); };
+      window.addEventListener('resize', onResize, { passive:true });
+
+      // Run story
+      await playStory();
+
+// Cleanup playback listeners
+window.removeEventListener('keydown', onKeySkip, true);
+modal.removeEventListener('pointerdown', onPointerSkip, true);
+
+      // End gate (press any key to start)
+      await toEndGate();
+
+      // Remove cutscene overlay
+      window.removeEventListener('resize', onResize);
+      removeModal(modal);
+
+      // Now hand back to the game (pointer lock + world reload)
+      if (typeof onStartGame === 'function') await onStartGame();
+    }
+  };
+})();
+</script>
 <div id="hint">Click to lock • WASD move • Shift sprint • Space jump</div>
 <div id="devConsole">
   <div class="row">
@@ -408,21 +1059,30 @@ function setModalReadyToStart(){
     window.removeEventListener('contextmenu', blockCtxMenu, true);
   };
 
-  const start = (e) => {
-    if (started) return;
-    started = true;
+const start = (e) => {
+  if (started) return;
+  started = true;
 
-    if (e?.cancelable) e.preventDefault();
-    e?.stopPropagation?.();
+  if (e?.cancelable) e.preventDefault();
+  e?.stopPropagation?.();
 
-    // enable pointer lock gate + request lock (user gesture)
-    if (window.__mfEnablePointerLock) window.__mfEnablePointerLock();
-    const c = document.getElementById('c');
-    if (c && !document.pointerLockElement) c.requestPointerLock();
+  cleanup();
+  closeModal(); // remove title modal FIRST
 
-    cleanup();
-    closeModal();
-  };
+  // Run opening cutscene
+  window.MF_Cutscene.play({
+    onStartGame: async () => {
+
+      // 1) only NOW enable pointer-lock gate + request lock (user gesture)
+      if (window.__mfEnablePointerLock) window.__mfEnablePointerLock();
+      const c = document.getElementById('c');
+      if (c && !document.pointerLockElement) c.requestPointerLock();
+
+      // 2) optional: clear any stuck key states you captured during cutscene
+      if (window.__mfClearKeys) window.__mfClearKeys();
+    }
+  });
+};
 
   const onKeyDown = (e) => {
     if (e.code === 'Tab') return;    // preserve your hidden console toggle
@@ -2391,6 +3051,23 @@ function animate(){
   requestAnimationFrame(animate);
 }
 requestAnimationFrame(animate);
+
+window.__mfResetWorld = async () => {
+  // If you want a “true reload”, you’re already doing the expensive rebuild here:
+  await loadLevel();
+  await loadMezza();
+
+  // If your world has any other runtime state to reset, do it here
+  vel.set(0,0,0);
+  grounded = false;
+  coyoteT = 0;
+  jumpBufferT = 0;
+};
+
+// Optional: give the cutscene a way to clear held keys
+window.__mfClearKeys = () => {
+  keys.clear();
+};
 </script>
 </body>
 </html>
