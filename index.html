@@ -220,6 +220,50 @@
   user-select: none;
   pointer-events: none;
 }
+
+#mfDeath{
+  position: fixed;
+  inset: 0;
+  z-index: 200000;
+  display: none;
+  place-items: center;
+  background: rgba(0,0,0,.66);
+  backdrop-filter: blur(6px);
+  user-select: none;
+}
+
+#mfDeath .panel{
+  width: min(92vw, 860px);
+  padding: 18px 18px 16px;
+  border-radius: 16px;
+  background: rgba(0,0,0,.72);
+  border: 1px solid rgba(255,255,255,.10);
+  box-shadow: 0 12px 38px rgba(0,0,0,.55);
+}
+
+#mfDeath .title{
+  font-family: "Orbitron", system-ui, sans-serif;
+  font-weight: 700;
+  letter-spacing: .12em;
+  font-size: 14px;
+  color: rgba(255,255,255,.75);
+  margin-bottom: 10px;
+}
+
+#mfDeath .poem{
+  font-family: system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.55;
+  color: rgba(255,255,255,.70);
+  white-space: pre-wrap;
+}
+
+#mfDeath .hint{
+  margin-top: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  opacity: .7;
+}
 </style>
 
 <script type="importmap">
@@ -953,6 +997,13 @@ modal.removeEventListener('pointerdown', onPointerSkip, true);
   </div>
   <div class="help">Tab to close • Enter to run</div>
 </div>
+<div id="mfDeath" aria-hidden="true">
+  <div class="panel">
+    <div class="title">YOU HAVE DIED</div>
+    <div class="poem" id="mfDeathPoem"></div>
+    <div class="hint">Press <b>R</b> to respawn</div>
+  </div>
+</div>
 <div id="mfModal" aria-hidden="false">
   <div class="stage">
     <div class="space">
@@ -1631,6 +1682,15 @@ addEventListener('keydown', (e) => {
     if (e.ctrlKey || e.metaKey) return;
     devBuffer += e.key;
     devConsoleInputEl.textContent = devBuffer;
+  }
+}, { capture: true });
+
+addEventListener('keydown', (e) => {
+  if (!deathActive) return;
+  if (e.code === 'KeyR'){
+    e.preventDefault();
+    e.stopPropagation();
+    if (deathLockoutT <= 0) respawn();
   }
 }, { capture: true });
 
@@ -2522,6 +2582,10 @@ function simplifyRDP2D(points, eps){
 ========================= */
 let bridgeMesh = null;
 
+// East escape trigger tuning
+const EAST_WALL_EPS = 0.15;     // how close to the bound counts as "touch"
+const EAST_REQUIRE_BRIDGE = true; // set false if you want ANY east-wall touch to kill
+
 const BRIDGE_TOL = 10;
 function isBridgePixel(r,g,b,a){
   if (a < 16) return false;
@@ -2779,6 +2843,100 @@ const rightV   = new THREE.Vector3();
 const wish     = new THREE.Vector3();
 const vel      = new THREE.Vector3();
 const playerPos = new THREE.Vector3(0, PLAYER_EYE_HEIGHT, 6);
+const spawnPos = new THREE.Vector3();
+
+/* =========================
+   DEATH SYSTEM (DROWNING v1)
+========================= */
+const DEATH_POEMS = {
+  drown: `You plummet into the great red sea, you fail to float and twist in unnatural ways as you feel your lungs fill with a familiar iron-tasting viscous fluid.\n\nYou have died.`,
+  exposure: `You attempt to flee by mantling up to the sky bridge, and walking across its infinite stretch to a seemingly more distant horizon; you fathom that marching onward for eternity is better than continued torment, but the cold starts to nip at your flesh, your fingers go numb, you shiver uncontrollably, and you eventually die from exposure.`
+};
+
+let deathActive = false;
+let deathCause = '';
+let deathSinkTargetEyeY = 0;
+let deathLockoutT = 0;
+
+const deathEl = document.getElementById('mfDeath');
+const deathPoemEl = document.getElementById('mfDeathPoem');
+
+function showDeathOverlay(text){
+  if (deathPoemEl) deathPoemEl.textContent = text || '';
+  if (deathEl){
+    deathEl.style.display = 'grid';
+    deathEl.setAttribute('aria-hidden', 'false');
+  }
+}
+
+function hideDeathOverlay(){
+  if (deathEl){
+    deathEl.style.display = 'none';
+    deathEl.setAttribute('aria-hidden', 'true');
+  }
+}
+
+function triggerDeath(cause){
+  if (deathActive) return;
+  deathActive = true;
+  deathCause = cause || 'drown';
+
+  // sink the *eye* about half player height below the surface
+  deathSinkTargetEyeY = SEA_LEVEL - (PLAYER_EYE_HEIGHT * 0.5);
+  deathLockoutT = 0.10; // tiny delay so we don't instantly respawn by stray key
+
+  // stop motion immediately
+  vel.set(0,0,0);
+  grounded = false;
+  coyoteT = 0;
+  jumpBufferT = 0;
+
+  showDeathOverlay(DEATH_POEMS[deathCause] || 'You have died.');
+}
+
+async function respawn(){
+  // ✅ reset state first
+  deathActive = false;
+  deathCause = '';
+  deathLockoutT = 0;
+
+  hideDeathOverlay();
+
+  // ✅ hard reset movement state
+  vel.set(0,0,0);
+  grounded = false;
+  supportedByCollider = false;
+  coyoteT = 0;
+  jumpBufferT = 0;
+
+  // ✅ teleport to spawn
+  playerPos.copy(spawnPos);
+
+  // optional: clamp to ground in case terrain moved
+  const groundY = Math.max(heightAtWorld(playerPos.x, playerPos.z), SEA_LEVEL) + PLAYER_EYE_HEIGHT;
+  playerPos.y = groundY;
+
+  // re-lock pointer (R is usually a user gesture)
+  const c = document.getElementById('c');
+  if (c && CAN_LOCK && !document.pointerLockElement){
+    try { c.requestPointerLock(); } catch {}
+  }
+}
+
+function playerFootY(){
+  return playerPos.y - PLAYER_EYE_HEIGHT;
+}
+
+function updateDeath(dt){
+  deathLockoutT = Math.max(0, deathLockoutT - dt); // ✅ tick down lockout
+
+  const sinkSpeed = 1.65;
+  playerPos.y = THREE.MathUtils.lerp(
+    playerPos.y,
+    deathSinkTargetEyeY,
+    1.0 - Math.pow(0.000001, dt * sinkSpeed)
+  );
+}
 
 let grounded = false;
 let coyoteT = 0;
@@ -2865,6 +3023,8 @@ async function loadLevel(){
   const py = Math.max(heightAtWorld(sp.x, sp.z), SEA_LEVEL) + PLAYER_EYE_HEIGHT;
   playerPos.set(sp.x, py, sp.z);
 
+  spawnPos.copy(playerPos); // ✅ remember spawn for respawn
+
   vel.set(0,0,0);
   grounded = false;
   coyoteT = 0;
@@ -2911,6 +3071,11 @@ try {
    MOVEMENT / PHYSICS STEP
 ========================= */
 function updatePlayer(dt){
+  if (deathActive){
+    updateDeath(dt);
+    return;
+  }
+
   const f = (keys.has('KeyW') ? 1 : 0) - (keys.has('KeyS') ? 1 : 0);
   const s = (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
   const sprint = keys.has('ShiftLeft') || keys.has('ShiftRight');
@@ -3044,12 +3209,43 @@ function updatePlayer(dt){
       }
     }
 
-    if (playerPos.y < seaFloorY){
+    if (!deathActive && playerPos.y < seaFloorY){
       playerPos.y = seaFloorY;
       if (vel.y < 0) vel.y = 0;
       grounded = true;
     }
   }
+
+// POST-PHYSICS HAZARDS
+const footY = playerPos.y - PLAYER_EYE_HEIGHT;
+
+// must be over water AND actually touching it
+if (
+  !deathActive &&
+  isWaterAtWorld(playerPos.x, playerPos.z) &&
+  footY <= SEA_LEVEL + 0.02
+){
+  triggerDeath('drown');
+  return;
+}
+
+// EAST WALL ESCAPE (exposure death)
+// Uses the same clamp bounds you already apply: clamp to [-halfW+1, halfW-1]
+if (!deathActive){
+  const eastBoundX = (halfW - 1); // matches your clamp line
+  const touchingEast = playerPos.x >= (eastBoundX - EAST_WALL_EPS);
+
+  // Optional: only kill if you're up at bridge height.
+  // Your bridge is placed at yBase = MAX_LAND_HEIGHT and thickness is 2.0,
+  // so being "on the bridge" basically means your feet are near MAX_LAND_HEIGHT.
+  const onBridgeHeight = footY >= (MAX_LAND_HEIGHT - 1.0);
+
+  if (touchingEast && (!EAST_REQUIRE_BRIDGE || onBridgeHeight)){
+    triggerDeath('exposure');
+    return;
+  }
+}
+
 }
 
 /* =========================
@@ -3129,8 +3325,13 @@ const clock = new THREE.Clock();
 function animate(){
   const dt = Math.min(clock.getDelta(), 0.033);
 
-  if (isLocked){
-    updatePlayer(dt);
+  if (deathActive){
+    deathLockoutT = Math.max(0, deathLockoutT - dt);
+    updateDeath(dt);
+  } else {
+    if (isLocked){
+      updatePlayer(dt);
+    }
   }
 
   updateMezzaAndCamera(dt);
