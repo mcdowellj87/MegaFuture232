@@ -229,6 +229,67 @@
   }
 }
 </script>
+<script>
+(() => {
+  // Holds blobs + object URLs so they stay in memory
+  const mem = new Map(); // url -> { blob, objectUrl, bytes }
+
+  async function fetchToMemory(url, { signal } = {}) {
+    if (mem.has(url)) return mem.get(url);
+
+    const res = await fetch(url, { cache: "force-cache", signal });
+    if (!res.ok) throw new Error(`fetch failed ${res.status} for ${url}`);
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+
+    const entry = { blob, objectUrl, bytes: blob.size };
+    mem.set(url, entry);
+    return entry;
+  }
+
+  // Optional: decode to avoid first-paint jank later
+  async function decodeImageObjectUrl(objectUrl) {
+    const img = new Image();
+    img.decoding = "async";
+    img.loading = "eager";
+    img.src = objectUrl;
+    // decode() is supported in modern browsers; fallback to onload
+    if (img.decode) {
+      await img.decode();
+    } else {
+      await new Promise((r, rej) => { img.onload = r; img.onerror = rej; });
+    }
+    return true;
+  }
+
+  // Concurrency-limited prefetch
+  async function prewarmImages(urls, { concurrency = 2, onProgress } = {}) {
+    let done = 0;
+    const queue = urls.slice();
+
+    async function worker() {
+      while (queue.length) {
+        const url = queue.shift();
+        const entry = await fetchToMemory(url);
+        await decodeImageObjectUrl(entry.objectUrl);
+        done++;
+        onProgress?.(done, urls.length, url, entry.bytes);
+      }
+    }
+
+    const workers = Array.from({ length: Math.max(1, concurrency) }, worker);
+    await Promise.all(workers);
+    return true;
+  }
+
+  // Expose tiny API
+  window.__mfMemAssets = {
+    has: (url) => mem.has(url),
+    getObjectUrl: (url) => mem.get(url)?.objectUrl || url,
+    prewarmImages,
+  };
+})();
+</script>
 </head>
 
 <body>
@@ -424,21 +485,22 @@
     if (modal && modal.parentNode) modal.parentNode.removeChild(modal);
   }
 
-  async function mountImage(cardEl, url){
-    return new Promise((resolve) => {
-      const img = new Image();
-      img.decoding = "async";
-      img.loading = "eager";
-      img.src = url;
-      img.onload = () => { cardEl.innerHTML = ""; cardEl.appendChild(img); resolve(true); };
-      img.onerror = () => resolve(false);
-    });
-  }
+async function mountImage(cardEl, url){
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.decoding = "async";
+    img.loading = "eager";
+    img.src = window.__mfMemAssets?.getObjectUrl(url) || url;
+    img.onload = () => { cardEl.innerHTML = ""; cardEl.appendChild(img); resolve(true); };
+    img.onerror = () => resolve(false);
+  });
+}
 
-  function setBgFrame(el, url){
-    if (!el) return;
-    el.style.backgroundImage = `url("${url}")`;
-  }
+function setBgFrame(el, url){
+  if (!el) return;
+  const u = window.__mfMemAssets?.getObjectUrl(url) || url;
+  el.style.backgroundImage = `url("${u}")`;
+}
 
   function preloadImages(urls){
     return Promise.all(urls.map(url => new Promise((resolve) => {
@@ -2809,12 +2871,38 @@ async function loadLevel(){
   jumpBufferT = 0;
 }
 
+const CUTSCENE_IMAGES = [
+  "images/blood_bay_1.png",
+  "images/blood_bay_2.png",
+  "images/blood_bay_3.png",
+  "images/blood_bay_4.png",
+  "images/blood_bay_5.png",
+  "images/amadeus.png",
+  "images/aristocrat.png",
+];
+
 try {
+  // Start prewarming ASAP (in parallel)
+  const prewarmPromise = window.__mfMemAssets?.prewarmImages(
+    CUTSCENE_IMAGES,
+    {
+      concurrency: 2, // keep low for “poor connection”
+      onProgress: (done, total, url) => {
+        // Optional: surface progress in your loader text
+        const loaderEl = document.getElementById("loader");
+        if (loaderEl) loaderEl.textContent = `loading… (${done}/${total})`;
+      }
+    }
+  );
+
   await loadLevel();
-  await loadMezza(); // if it fails, fallback prisms are used
+  await loadMezza();
+
+  // IMPORTANT: don’t say “ready” until the cutscene assets are hot too
+  if (prewarmPromise) await prewarmPromise;
+
 } catch (err) {
   console.error('[init] world init failed:', err);
-  // still allow user to start so you can debug in-world
 } finally {
   window.dispatchEvent(new Event('mf:world-ready'));
 }
