@@ -263,6 +263,7 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size: 12px;
   opacity: .7;
+  color:white;
 }
 </style>
 
@@ -1062,7 +1063,6 @@ modal.removeEventListener('pointerdown', onPointerSkip, true);
       </div>
     </div>
   </div>
-
   <div id="fictionBlurb">
     <div>This work is a work of fiction.</div>
     <div>All characters and events portrayed in this game are fictional.</div>
@@ -1212,42 +1212,45 @@ function setModalReadyToStart(){
     window.removeEventListener('contextmenu', blockCtxMenu, true);
   };
 
-const start = (e) => {
-  if (started) return;
-  started = true;
+  const start = (e) => {
+    if (started) return;
+    started = true;
 
-  if (e?.cancelable) e.preventDefault();
-  e?.stopPropagation?.();
+    if (e?.cancelable) e.preventDefault();
+    e?.stopPropagation?.();
 
-  cleanup();
-  closeModal(); // remove title modal FIRST
+    cleanup();
+    closeModal(); // remove title modal FIRST
 
-  // Run opening cutscene
-  window.MF_Cutscene.play({
-    onStartGame: async () => {
-    // ✅ audio init (user gesture context)
-await ensureFootstepsReady();
-
-      // 1) only NOW enable pointer-lock gate + request lock (user gesture)
-      if (window.__mfEnablePointerLock) window.__mfEnablePointerLock();
-      const c = document.getElementById('c');
-      if (c && !document.pointerLockElement) c.requestPointerLock();
-
-      // 2) optional: clear any stuck key states you captured during cutscene
-      if (window.__mfClearKeys) window.__mfClearKeys();
+    // ✅ start music on the same user gesture
+    const music = document.getElementById('mfMusic');
+    if (music && music.paused) {
+      music.volume = 0.6;
+      music.loop = true;
+      music.play().catch(() => {});
     }
-  });
-};
+
+    // Run opening cutscene, then enter game
+    window.MF_Cutscene.play({
+      onStartGame: async () => {
+        await ensureFootstepsReady();
+
+        if (window.__mfEnablePointerLock) window.__mfEnablePointerLock();
+        const c = document.getElementById('c');
+        if (c && !document.pointerLockElement) c.requestPointerLock();
+
+        if (window.__mfClearKeys) window.__mfClearKeys();
+      }
+    });
+  };
 
   const onKeyDown = (e) => {
-    if (e.code === 'Tab') return;    // preserve your hidden console toggle
-    if (e.code === 'Escape') return; // don't start on Escape
+    if (e.code === 'Tab') return;
+    if (e.code === 'Escape') return;
     start(e);
   };
 
   const onPointerDown = (e) => {
-    // ✅ catches left/middle/right click
-    // ✅ prevents context menu because it runs before contextmenu
     if (e.cancelable) e.preventDefault();
     e.stopPropagation();
     start(e);
@@ -1256,7 +1259,6 @@ await ensureFootstepsReady();
   window.addEventListener('keydown', onKeyDown, true);
   modal.addEventListener('pointerdown', onPointerDown, true);
 
-  // ✅ global contextmenu block while modal exists
   window.addEventListener('contextmenu', blockCtxMenu, true);
 }
 
@@ -3550,5 +3552,11 @@ window.__mfClearKeys = () => {
   keys.clear();
 };
 </script>
+<audio
+  id="mfMusic"
+  src="audio/megafuture.mp3"
+  preload="auto"
+  loop
+></audio>
 </body>
 </html>

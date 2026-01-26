@@ -2,6 +2,9 @@
 /assets/
 /assets/**
 
+# temp / placeholder music (copyrighted)
+audio/megafuture.mp3
+
 # macOS filesystem junk
 .DS_Store
 **/.DS_Store
