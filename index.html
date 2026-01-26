@@ -640,26 +640,6 @@
         el.style.backgroundImage = `url("${u}")`;
       }
 
-      async function ensureFootstepsReady() {
-        if (footReady || footLoading) return footReady;
-        footLoading = true;
-
-        try {
-          [footBufA, footBufB, footBufC] = await Promise.all([
-            decodeFromMemOrFetch(WALK_STEP_1_URL),
-            decodeFromMemOrFetch(WALK_STEP_2_URL),
-            decodeFromMemOrFetch(WALK_STEP_3_URL),
-          ]);
-
-          footReady = true;
-          return true;
-        } catch (err) {
-          console.warn("[audio] footstep decode failed:", err);
-          footReady = false;
-          return false;
-        }
-      }
-
       function preloadImages(urls) {
         return Promise.all(urls.map(url => new Promise((resolve) => {
           const img = new Image();
