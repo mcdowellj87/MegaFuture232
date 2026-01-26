@@ -2099,7 +2099,10 @@ function closestPtsSegSeg(a0,a1,b0,b1,outA,outB){
   outB.copy(b0).addScaledVector(d2, t);
 }
 
+let lastSupportTag = '';
+
 function resolveCollisions(pos){
+  lastSupportTag = '';   // ✅ reset each call
   const cap = getPlayerCapsule(pos);
   const {min,max} = aabbForCapsule(cap.a, cap.b, cap.r);
   const ids = queryNearby(min,max);
@@ -2121,7 +2124,10 @@ function resolveCollisions(pos){
       const pen = rr - d;
 
       pos.addScaledVector(_nrm, pen);
-      if (_nrm.y > 0.55) supported = true;
+      if (_nrm.y > 0.55){
+  supported = true;
+  lastSupportTag = c.tag || '';
+}
 
     } else {
       const pts = [cap.a, _tmp1.copy(cap.a).lerp(cap.b,0.5), cap.b];
@@ -2146,7 +2152,10 @@ function resolveCollisions(pos){
 
       if (bestPen > 0){
         pos.addScaledVector(_nrm, bestPen);
-        if (_nrm.y > 0.55) supported = true;
+        if (_nrm.y > 0.55){
+  supported = true;
+  lastSupportTag = c.tag || '';
+}
       }
     }
   }
@@ -2310,6 +2319,7 @@ function buildTreeInstancesFromBlobs(blobs){
 
     colliders.push({
       type:'cap',
+      tag:'trunk',
       a: new THREE.Vector3(wx, base + trunkR, wz),
       b: new THREE.Vector3(wx, base + trunkH - trunkR, wz),
       r: trunkR * 1.05
@@ -2340,7 +2350,7 @@ function buildTreeInstancesFromBlobs(blobs){
       const A = new THREE.Vector3(0,-0.5,0).applyMatrix4(m);
       const B = new THREE.Vector3(0, 0.5,0).applyMatrix4(m);
       const br = (Math.max(BRANCH_R0_BASE, BRANCH_R1_BASE) * thickness) * 1.05;
-      colliders.push({ type:'cap', a:A, b:B, r: br });
+      colliders.push({ type:'cap', tag:'branch', a:A, b:B, r: br });
     }
   }
 
@@ -2850,7 +2860,8 @@ const spawnPos = new THREE.Vector3();
 ========================= */
 const DEATH_POEMS = {
   drown: `You plummet into the great red sea, you fail to float and twist in unnatural ways as you feel your lungs fill with a familiar iron-tasting viscous fluid.\n\nYou have died.`,
-  exposure: `You attempt to flee by mantling up to the sky bridge, and walking across its infinite stretch to a seemingly more distant horizon; you fathom that marching onward for eternity is better than continued torment, but the cold starts to nip at your flesh, your fingers go numb, you shiver uncontrollably, and you eventually die from exposure.`
+  exposure: `You attempt to flee by mantling up to the sky bridge, and walking across its infinite stretch to a seemingly more distant horizon; you fathom that marching onward for eternity is better than continued torment, but the cold starts to nip at your flesh, your fingers go numb, you shiver uncontrollably, and you eventually die from exposure.`,
+  treefall: `Your clever attempts at breaking down trees to create a raft are thwarted as your feet give way and you tumble to the cold hard snow below.`
 };
 
 let deathActive = false;
@@ -3174,6 +3185,7 @@ function updatePlayer(dt){
     playerPos.z = THREE.MathUtils.clamp(playerPos.z, -halfH+1, halfH-1);
 
     const supported = resolveCollisions(playerPos);
+    
     if (supported) supportedByCollider = true;
 
     const groundY = heightAtWorld(playerPos.x, playerPos.z) + PLAYER_EYE_HEIGHT;
@@ -3242,6 +3254,24 @@ if (!deathActive){
 
   if (touchingEast && (!EAST_REQUIRE_BRIDGE || onBridgeHeight)){
     triggerDeath('exposure');
+    return;
+  }
+}
+
+// TREE BRANCH FAIL (trying to climb/break branches)
+if (
+  !deathActive &&
+  grounded &&
+  supportedByCollider &&
+  lastSupportTag === 'branch'
+){
+  // Must be meaningfully above ground (prevents side-bumps / near-ground twigs)
+  const groundFootY = heightAtWorld(playerPos.x, playerPos.z);
+  const minClearance = 0.85 * PLAYER_SCALE; // tweak 0.6..1.2
+  const elevated = (footY - groundFootY) > minClearance;
+
+  if (elevated){
+    triggerDeath('treefall');
     return;
   }
 }
