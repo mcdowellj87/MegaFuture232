@@ -326,11 +326,31 @@
     return true;
   }
 
+  async function prewarmFiles(urls, { concurrency = 2, onProgress } = {}) {
+    let done = 0;
+    const queue = urls.slice();
+
+    async function worker() {
+      while (queue.length) {
+        const url = queue.shift();
+        const entry = await fetchToMemory(url);
+        done++;
+        onProgress?.(done, urls.length, url, entry.bytes);
+      }
+    }
+
+    const workers = Array.from({ length: Math.max(1, concurrency) }, worker);
+    await Promise.all(workers);
+    return true;
+  }
+
   // Expose tiny API
   window.__mfMemAssets = {
     has: (url) => mem.has(url),
     getObjectUrl: (url) => mem.get(url)?.objectUrl || url,
+    getBlob: (url) => mem.get(url)?.blob || null,
     prewarmImages,
+    prewarmFiles, // ✅ generic "fetch into memory" (great for audio)
   };
 })();
 </script>
@@ -544,6 +564,26 @@ function setBgFrame(el, url){
   if (!el) return;
   const u = window.__mfMemAssets?.getObjectUrl(url) || url;
   el.style.backgroundImage = `url("${u}")`;
+}
+
+async function ensureFootstepsReady(){
+  if (footReady || footLoading) return footReady;
+  footLoading = true;
+
+  try{
+    [footBufA, footBufB, footBufC] = await Promise.all([
+      decodeFromMemOrFetch(WALK_STEP_1_URL),
+      decodeFromMemOrFetch(WALK_STEP_2_URL),
+      decodeFromMemOrFetch(WALK_STEP_3_URL),
+    ]);
+
+    footReady = true;
+    return true;
+  }catch(err){
+    console.warn("[audio] footstep decode failed:", err);
+    footReady = false;
+    return false;
+  }
 }
 
   function preloadImages(urls){
@@ -1185,6 +1225,8 @@ const start = (e) => {
   // Run opening cutscene
   window.MF_Cutscene.play({
     onStartGame: async () => {
+    // ✅ audio init (user gesture context)
+await ensureFootstepsReady();
 
       // 1) only NOW enable pointer-lock gate + request lock (user gesture)
       if (window.__mfEnablePointerLock) window.__mfEnablePointerLock();
@@ -1253,6 +1295,96 @@ import { GLTFLoader } from './vendor/GLTFLoader.js';
 const MAP_URL = './images/map.png';
 const MEZZA_WALK_GLB = './assets/mezza_walking.glb';
 const MEZZA_RUN_GLB  = './assets/mezza_running.glb';
+
+/* =========================
+   AUDIO (walking footsteps only)
+========================= */
+const WALK_STEP_1_URL = "./audio/step_8.mp3";
+const WALK_STEP_2_URL = "./audio/step_9.mp3";
+const WALK_STEP_3_URL = "./audio/step_4.mp3"; // <-- your new one
+
+const WALK_STEP_SOUNDS = [WALK_STEP_1_URL, WALK_STEP_2_URL, WALK_STEP_3_URL];
+
+let audioCtx = null;
+let footGain = null;
+let footBufA = null;
+let footBufB = null;
+let footBufC = null; // ✅ new
+let footNext = 0;
+let footReady = false;
+
+let footTimer = 0;
+// Tweak: smaller = more frequent steps
+const FOOTSTEP_INTERVAL_S = 0.42;
+// volume tuning
+const FOOTSTEP_GAIN = 0.22;
+
+let footLoading = false; // add near your other foot vars
+
+async function ensureFootstepsReady(){
+  if (footReady || footLoading) return footReady;
+  footLoading = true;
+
+  // Must be called after a user gesture (your start)
+  audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === "suspended") {
+    try { await audioCtx.resume(); } catch {}
+  }
+
+  footGain = footGain || audioCtx.createGain();
+  footGain.gain.value = FOOTSTEP_GAIN;
+  footGain.connect(audioCtx.destination);
+
+  async function decodeFromMemOrFetch(url){
+    const blob = window.__mfMemAssets?.getBlob(url);
+    const ab = blob ? await blob.arrayBuffer() : await (await fetch(url)).arrayBuffer();
+    return await audioCtx.decodeAudioData(ab);
+  }
+
+  try{
+    [footBufA, footBufB, footBufC] = await Promise.all([
+      decodeFromMemOrFetch(WALK_STEP_1_URL),
+      decodeFromMemOrFetch(WALK_STEP_2_URL),
+      decodeFromMemOrFetch(WALK_STEP_3_URL),
+    ]);
+
+    footReady = true;
+    footLoading = false;
+    return true;
+  }catch(err){
+    console.warn("[audio] footstep decode failed:", err);
+    footReady = false;
+    footLoading = false;
+    return false;
+  }
+}
+
+// ✅ add this line after the function definition
+window.ensureFootstepsReady = ensureFootstepsReady;
+
+function playFootstep(){
+  if (!footReady || !audioCtx || !footGain) return;
+
+  // ~15% chance to use the “spice” sample
+  const RARE_CHANCE = 0.35;
+
+  let buf = null;
+
+  if (footBufC && Math.random() < RARE_CHANCE){
+    buf = footBufC;
+  } else {
+    buf = (footNext++ % 2 === 0) ? footBufA : footBufB; // your existing A/B alternation
+  }
+
+  if (!buf) return;
+
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  src.playbackRate.value = 0.96 + Math.random() * 0.08;
+
+  src.connect(footGain);
+  src.start();
+}
 
 /* =========================
    WORLD TUNING
@@ -3054,17 +3186,22 @@ const CUTSCENE_IMAGES = [
 
 try {
   // Start prewarming ASAP (in parallel)
-  const prewarmPromise = window.__mfMemAssets?.prewarmImages(
-    CUTSCENE_IMAGES,
-    {
-      concurrency: 2, // keep low for “poor connection”
-      onProgress: (done, total, url) => {
-        // Optional: surface progress in your loader text
-        const loaderEl = document.getElementById("loader");
-        if (loaderEl) loaderEl.textContent = `loading… (${done}/${total})`;
-      }
+const prewarmPromise = (async () => {
+  // images (decode too)
+  const p1 = window.__mfMemAssets?.prewarmImages(CUTSCENE_IMAGES, {
+    concurrency: 2,
+    onProgress: (done, total, url) => {
+      const loaderEl = document.getElementById("loader");
+      if (loaderEl) loaderEl.textContent = `loading… (${done}/${total})`;
     }
-  );
+  });
+
+  // audio (fetch only; decode later after user gesture)
+const p2 = window.__mfMemAssets?.prewarmFiles(WALK_STEP_SOUNDS, { concurrency: 2 });
+
+  await Promise.all([p1, p2].filter(Boolean));
+  return true;
+})();
 
   await loadLevel();
   await loadMezza();
@@ -3275,6 +3412,31 @@ if (
     return;
   }
 }
+
+  // -------------------------
+  // Footsteps (walking only)
+  // -------------------------
+  const horizSpeed = Math.hypot(vel.x, vel.z);
+
+  const isWalkingNow =
+    !deathActive &&
+    grounded &&
+    !sprint &&                 // ✅ NOT running
+    horizSpeed > 0.6;          // ✅ actually moving (not just holding keys)
+
+  if (isWalkingNow && footReady){
+    footTimer += dt;
+
+    // optional: slight cadence scaling with speed (still simple)
+    const cadence = FOOTSTEP_INTERVAL_S * THREE.MathUtils.clamp(10.0 / Math.max(1e-3, horizSpeed), 0.75, 1.25);
+
+    if (footTimer >= cadence){
+      playFootstep();
+      footTimer = 0;
+    }
+  } else {
+    footTimer = 0;
+  }
 
 }
 
